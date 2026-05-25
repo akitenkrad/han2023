@@ -10,29 +10,23 @@ Usage:
     sabm-tools show-experiment-settings
     sabm-tools show-experiment-settings --results-dir results/20260525_120000
     sabm-tools show-experiment-settings --results-dir results/latest --json
+
+results ディレクトリ解決は共有ヘルパ `socsim_tools.io.resolve_results_dir` に委譲する
+(出力はバイト等価)．run/benchmark 設定テーブルは複合行 (限界費用 c1/c2) を含み汎用
+`render_run_config` の `{label}: {value}` 形に収まらないため sabm 側に残す．sweep 設定
+テーブル・解析ベンチマークブロック・LLM メタブロック (llm_meta.json 固有のヘッダと
+最終ラウンド/平均価格/CI 行を持つ) と `--json` の `kind`/`benchmarks`/`llm_meta`
+フィールドも sabm 固有なので本モジュールに残す．
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
-
-def _resolve_results_dir(arg: str) -> Path:
-    """ユーザ指定の results_dir を絶対パスに解決する (symlink も実体へ)．"""
-    p = Path(arg)
-    if not p.is_absolute():
-        candidates = [Path.cwd() / arg, p]
-        for c in candidates:
-            if c.exists():
-                p = c
-                break
-        else:
-            p = candidates[0]
-    return Path(os.path.realpath(p))
+from socsim_tools.io import resolve_results_dir
 
 
 def _find_config_file(results_dir: Path) -> tuple[Path, str]:
@@ -171,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    results_dir = _resolve_results_dir(args.results_dir)
+    results_dir = resolve_results_dir(args.results_dir)
     if not results_dir.exists():
         print(f"エラー: ディレクトリが存在しません: {results_dir}", file=sys.stderr)
         return 1

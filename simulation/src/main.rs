@@ -8,13 +8,11 @@
 //!               `sweep_summary.csv` に集計する．
 //! `reproduce` : 論文 Fig.1/2/4 一括再現 (Phase 3; 現状はスタブで案内のみ)．
 
-use std::fs::{self, File};
-use std::io::BufWriter;
+use std::fs;
 use std::path::Path;
 
-use chrono::Local;
 use clap::{Parser, Subcommand};
-use csv::Writer;
+use socsim_results::{ensure_dir, refresh_latest_symlink, timestamp, write_csv, write_json};
 
 use sabm_simulation::config::{derive_run_seed, Config, LlmSettings};
 use sabm_simulation::llm::wrap_client;
@@ -262,18 +260,6 @@ struct SweepConfigJson {
     llm_seed: u64,
 }
 
-/// latest シンボリックリンクを (再) 作成する．
-fn refresh_latest(output_dir: &str, target: &str) {
-    let symlink_path = Path::new(output_dir).join("latest");
-    if symlink_path.is_symlink() {
-        let _ = fs::remove_file(&symlink_path);
-    }
-    #[cfg(unix)]
-    {
-        let _ = std::os::unix::fs::symlink(target, &symlink_path);
-    }
-}
-
 /// カンマ区切り文字列を trim 済みの非空リストへ．
 fn split_csv(s: &str) -> Vec<String> {
     s.split(',')
@@ -354,16 +340,15 @@ fn cmd_benchmark(args: BenchmarkArgs) {
     let bench = compute_benchmarks(&cfg);
     let dp = cfg.demand_params();
 
-    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let timestamp = timestamp();
     let output_dir = format!("{}/{}", args.output_dir, timestamp);
     ensure_output_dir(&output_dir);
     save_benchmarks(&bench, &output_dir);
-    // config.json も書く (show-experiment-settings で読めるように)．
+    // config.json も書く (show-experiment-settings で読めるように; pretty-JSON は
+    // socsim_results::write_json に委譲, バイト等価)．
     let path = format!("{}/config.json", output_dir);
-    let file = File::create(&path).expect("config.json の作成に失敗");
-    serde_json::to_writer_pretty(BufWriter::new(file), &cfg.to_run_config_json())
-        .expect("config.json の書き込みに失敗");
-    refresh_latest(&args.output_dir, &timestamp);
+    write_json(&cfg.to_run_config_json(), &path).expect("config.json の書き込みに失敗");
+    let _ = refresh_latest_symlink(&args.output_dir, &timestamp);
 
     println!("=== Han, Wu & Xiao (2023) SABM 解析ベンチマーク ===");
     println!(
@@ -403,7 +388,7 @@ fn cmd_benchmark(args: BenchmarkArgs) {
 fn cmd_run(args: RunArgs) {
     let persona = parse_persona(&args.persona).unwrap_or_else(|e| panic!("{}", e));
 
-    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let timestamp = timestamp();
     let output_dir = format!("{}/{}", args.output_dir, timestamp);
 
     if let Some(parent) = Path::new(&args.cache_path).parent() {
@@ -473,15 +458,13 @@ fn cmd_run(args: RunArgs) {
             save_benchmarks(&result.benchmarks, &output_dir);
             save_llm_meta(&result, &cfg, &output_dir);
             let path = format!("{}/config.json", output_dir);
-            let file = File::create(&path).expect("config.json の作成に失敗");
-            serde_json::to_writer_pretty(BufWriter::new(file), &cfg.to_run_config_json())
-                .expect("config.json の書き込みに失敗");
+            write_json(&cfg.to_run_config_json(), &path).expect("config.json の書き込みに失敗");
             last_result = Some(result);
             last_cfg = Some(cfg);
         }
     }
 
-    refresh_latest(&args.output_dir, &timestamp);
+    let _ = refresh_latest_symlink(&args.output_dir, &timestamp);
 
     if let (Some(result), Some(_cfg)) = (&last_result, &last_cfg) {
         let stable = result
@@ -536,9 +519,9 @@ fn cmd_sweep(args: SweepArgs) {
         })
         .collect();
 
-    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let timestamp = timestamp();
     let sweep_dir = format!("{}/{}_sweep", args.output_dir, timestamp);
-    fs::create_dir_all(&sweep_dir).expect("sweep ディレクトリの作成に失敗");
+    ensure_dir(&sweep_dir).expect("sweep ディレクトリの作成に失敗");
     if let Some(parent) = Path::new(&args.cache_path).parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -611,15 +594,10 @@ fn cmd_sweep(args: SweepArgs) {
         }
     }
 
-    // sweep_summary.csv
+    // sweep_summary.csv (各行を serialize; socsim_results::write_csv に委譲, バイト等価)．
     {
         let path = format!("{}/sweep_summary.csv", sweep_dir);
-        let file = File::create(&path).expect("sweep_summary.csv の作成に失敗");
-        let mut wtr = Writer::from_writer(BufWriter::new(file));
-        for row in &summary_rows {
-            wtr.serialize(row).expect("サマリ行の書き込みに失敗");
-        }
-        wtr.flush().expect("フラッシュに失敗");
+        write_csv(&summary_rows, &path).expect("sweep_summary.csv の書き込みに失敗");
     }
 
     // sweep_config.json
@@ -640,12 +618,10 @@ fn cmd_sweep(args: SweepArgs) {
             llm_seed: args.llm_seed,
         };
         let path = format!("{}/sweep_config.json", sweep_dir);
-        let file = File::create(&path).expect("sweep_config.json の作成に失敗");
-        serde_json::to_writer_pretty(BufWriter::new(file), &config_json)
-            .expect("sweep_config.json の書き込みに失敗");
+        write_json(&config_json, &path).expect("sweep_config.json の書き込みに失敗");
     }
 
-    refresh_latest(&args.output_dir, &format!("{}_sweep", timestamp));
+    let _ = refresh_latest_symlink(&args.output_dir, &format!("{}_sweep", timestamp));
 
     println!("===========================================================");
     println!("スイープ完了: {} 実行", n_total);

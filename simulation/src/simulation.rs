@@ -10,11 +10,8 @@
 //!   温度・seed・cache-hit を `llm_meta.json` に記録する．
 
 use std::cell::RefCell;
-use std::fs::{self, File};
-use std::io::BufWriter;
 use std::rc::Rc;
 
-use csv::Writer;
 use rand::Rng;
 use serde::Serialize;
 
@@ -220,29 +217,22 @@ pub fn run_with_client(
 
 /// 出力ディレクトリを作成する．
 pub fn ensure_output_dir(output_dir: &str) {
-    fs::create_dir_all(output_dir).expect("出力ディレクトリの作成に失敗");
+    socsim_results::ensure_dir(output_dir).expect("出力ディレクトリの作成に失敗");
 }
 
 /// `rounds.csv` を保存する (long-format)．
+///
+/// 各行 [`RoundRow`] を `serialize` し先頭にヘッダを書く csv クレットの標準挙動を
+/// `socsim_results::write_csv` に委譲する (従来の手書き writer とバイト等価)．
 pub fn save_rounds(rounds: &[RoundRow], output_dir: &str) {
     let path = format!("{}/rounds.csv", output_dir);
-    let file = File::create(&path).expect("rounds.csv の作成に失敗");
-    let mut wtr = Writer::from_writer(BufWriter::new(file));
-    for r in rounds {
-        wtr.serialize(r).expect("ラウンド行の書き込みに失敗");
-    }
-    wtr.flush().expect("フラッシュに失敗");
+    socsim_results::write_csv(rounds, &path).expect("rounds.csv の書き込みに失敗");
 }
 
-/// `metrics.csv` を保存する．
+/// `metrics.csv` を保存する (writer は `socsim_results::write_csv` に委譲; バイト等価)．
 pub fn save_metrics(metrics: &[MetricRow], output_dir: &str) {
     let path = format!("{}/metrics.csv", output_dir);
-    let file = File::create(&path).expect("metrics.csv の作成に失敗");
-    let mut wtr = Writer::from_writer(BufWriter::new(file));
-    for m in metrics {
-        wtr.serialize(m).expect("メトリクス行の書き込みに失敗");
-    }
-    wtr.flush().expect("フラッシュに失敗");
+    socsim_results::write_csv(metrics, &path).expect("metrics.csv の書き込みに失敗");
 }
 
 /// `benchmarks.json` の構造体．
@@ -263,10 +253,10 @@ pub fn save_benchmarks(bench: &Benchmarks, output_dir: &str) {
         p_bertrand_mean: mean(&bench.p_bertrand),
         p_cartel_mean: mean(&bench.p_cartel),
     };
+    // pretty-print JSON の書き出しは socsim_results::write_json に委譲する
+    // (内部は serde_json::to_writer_pretty + flush; 従来の writer とバイト等価)．
     let path = format!("{}/benchmarks.json", output_dir);
-    let file = File::create(&path).expect("benchmarks.json の作成に失敗");
-    serde_json::to_writer_pretty(BufWriter::new(file), &json)
-        .expect("benchmarks.json の書き込みに失敗");
+    socsim_results::write_json(&json, &path).expect("benchmarks.json の書き込みに失敗");
 }
 
 /// `llm_meta.json` の構造体 (provider/model/endpoint/temperature/seed/cache 統計)．
@@ -305,10 +295,12 @@ pub fn save_llm_meta(result: &SimulationResult, cfg: &Config, output_dir: &str) 
                            benchmarks, and bounded-memory updates) is deterministic given the \
                            seed.",
     };
+    // llm_meta.json の値の出所は従来どおり result / cfg のまま (LlmMetaJson の構造・
+    // フィールド名・順序・determinism_note を保持)．writer (pretty-JSON + flush) のみ
+    // socsim_results::write_json に委譲する (バイト等価)．`RunMetadata::summary()` は
+    // cache-hit 100% 再実行や呼び出し 0 件で endpoint/model が変わりうるため使わない．
     let path = format!("{}/llm_meta.json", output_dir);
-    let file = File::create(&path).expect("llm_meta.json の作成に失敗");
-    serde_json::to_writer_pretty(BufWriter::new(file), &meta)
-        .expect("llm_meta.json の書き込みに失敗");
+    socsim_results::write_json(&meta, &path).expect("llm_meta.json の書き込みに失敗");
 }
 
 #[cfg(test)]
