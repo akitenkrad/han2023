@@ -1,0 +1,20 @@
+[project]
+name = "sabm-tools"
+version = "0.1.0"
+description = "Han, Wu & Xiao (2023) SABM LLM-agent Bertrand-duopoly firm competition / tacit collusion simulation — visualization & analysis tools"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.8",
+    "numpy>=1.26",
+    "pandas>=2.2",
+]
+
+[project.scripts]
+sabm-tools = "sabm_tools.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sabm_tools"]

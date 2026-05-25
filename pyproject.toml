@@ -1,0 +1,13 @@
+[project]
+name = "han2023-workspace"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "sabm-tools",
+]
+
+[tool.uv.workspace]
+members = ["tools"]
+
+[tool.uv.sources]
+sabm-tools = { workspace = true }
