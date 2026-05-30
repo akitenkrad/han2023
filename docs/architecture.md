@@ -15,9 +15,9 @@ han2023/
 │   │   ├── demand.rs           # linear demand q_i, profit π_i (deterministic core)
 │   │   ├── analytic.rs         # Bertrand-equilibrium & cartel prices (deterministic, exact)
 │   │   ├── world.rs            # MarketWorld (WorldState), Persona, RoundRecord
-│   │   ├── mechanisms.rs       # 5 mechanisms over the 6-phase loop
+│   │   ├── mechanisms.rs       # 6 mechanisms over the 6-phase loop
 │   │   ├── llm.rs              # socsim-llm composition (Ollama→OpenAI + cache)
-│   │   ├── prompts.rs          # pricing prompt (5 sections + bounded history) + parse
+│   │   ├── prompts.rs          # pricing prompt + communication (cheap-talk) prompt + parse
 │   │   ├── metrics.rs          # rounds/metrics rows, convergence detection
 │   │   ├── simulation.rs       # init_world + run driver (SimulationBuilder wiring)
 │   │   └── lib.rs
@@ -31,12 +31,13 @@ han2023/
 
 A differentiated-goods **Bertrand duopoly** (default 2 firms) repeated pricing game. Non-spatial and non-network — the firms interact only through the market (the demand split), so the project depends on `socsim-core` + `socsim-engine` + `socsim-llm` only (no `socsim-grid` / `socsim-net`).
 
-One paper round = one socsim tick. The round is decomposed into five mechanisms mapped onto the six-phase loop:
+One paper round = one socsim tick. The round is decomposed into six mechanisms mapped onto the six-phase loop:
 
 | Mechanism | Phase | Role |
 |-----------|-------|------|
 | `MarketEnvironment` | `Environment` | round-start market check / quantity-buffer reset |
-| `PricingDecision`   | `Decision`    | **LLM lives here**: each firm's next price from bounded memory + persona + benchmark prices; firms set prices *simultaneously* (synchronous bulk assignment); reflection every 20 rounds |
+| `CommunicationPhase` | `Environment` | **communication variant only** (`--communication`): each firm emits an LLM cheap-talk message before pricing, injected into the next pricing prompt. A complete **no-op** when communication is off (no LLM call, no state change → the default path is bit-identical) |
+| `PricingDecision`   | `Decision`    | **LLM lives here**: each firm's next price from bounded memory + persona + benchmark prices (+ rival messages when communication is on); firms set prices *simultaneously* (synchronous bulk assignment); reflection every 20 rounds |
 | `MarketClearing`    | `Interaction` | linear demand `q_i = (α − β p_i + d Σ_{j≠i} p_j) / b` |
 | `ProfitReward`      | `Reward`      | profit `π_i = (p_i − c_i) q_i`, collusion index, convergence/bounded-oscillation stop via `request_stop()` |
 | `MemoryUpdate`      | `PostStep`    | append the round record, truncate to the 20-round window |

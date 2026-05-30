@@ -26,6 +26,40 @@ fn scripted_const(price: f64) -> SabmClient {
     wrap_client(backend, PromptCache::in_memory())
 }
 
+/// 会話プロンプト (## Message) にはメッセージを，価格プロンプトにはその企業の
+/// (Bertrand, cartel) 中点へ寄せる «暗黙の共謀» 風の価格を返す mock．
+/// 非対称コストでは per-firm 中点が異なるので価格も非対称に分かれる．
+fn scripted_midpoint() -> SabmClient {
+    let backend = ScriptedClient::new("mock-model", |prompt: &str| {
+        if prompt.contains("## Message") {
+            return "{\"message\": \"Let's hold prices high.\"}".to_string();
+        }
+        // プロンプトに刻まれた per-firm の Bertrand/cartel 中点を読む．
+        let parse_after = |marker: &str| -> Option<f64> {
+            let idx = prompt.find(marker)?;
+            let rest = &prompt[idx + marker.len()..];
+            let mut num = String::new();
+            let mut dot = false;
+            for c in rest.trim_start().chars() {
+                if c.is_ascii_digit() {
+                    num.push(c);
+                } else if c == '.' && !dot {
+                    dot = true;
+                    num.push(c);
+                } else {
+                    break;
+                }
+            }
+            num.trim_end_matches('.').parse::<f64>().ok()
+        };
+        let b = parse_after("Bertrand) price is around ").unwrap_or(6.0);
+        let m = parse_after("monopoly/cartel) price is around ").unwrap_or(8.0);
+        let mid = 0.5 * (b + m);
+        format!("{{\"price\": {mid:.4}}}")
+    });
+    wrap_client(backend, PromptCache::in_memory())
+}
+
 fn basic_demand() -> DemandParams {
     DemandParams::new(14.0, 1.0 / 150.0, 1.0 / 300.0)
 }
@@ -200,4 +234,137 @@ fn convergence_stops_early() {
         cfg.max_rounds
     );
     assert!(result.rounds_to_stable().is_some(), "安定到達が検出される");
+}
+
+// --------------------------------------------------------------------------- //
+// 会話あり代替モデル: CommunicationPhase が走り価格軌跡を生成する
+// --------------------------------------------------------------------------- //
+
+#[test]
+fn communication_mode_runs_and_collude_in_band() {
+    let cfg = Config {
+        communication: true,
+        max_rounds: 60,
+        ..base_config()
+    };
+    let result = run_with_client(&cfg, scripted_midpoint()).unwrap();
+    assert!(!result.metrics.is_empty(), "会話ありでも軌跡が生成される");
+    let last = result.metrics.last().unwrap();
+    // 対称コスト → 中点 7.0 / CI 0.5．
+    assert!(
+        (last.avg_price - 7.0).abs() < 1e-6,
+        "avg={}",
+        last.avg_price
+    );
+    assert!(
+        (last.collusion_index - 0.5).abs() < 1e-6,
+        "CI={}",
+        last.collusion_index
+    );
+}
+
+// --------------------------------------------------------------------------- //
+// 会話なし (基本モデル) は会話機能追加前と bit 等価: CommunicationPhase は no-op
+// --------------------------------------------------------------------------- //
+
+#[test]
+fn no_communication_is_unaffected_by_communication_phase() {
+    // communication=false では CommunicationPhase は LLM を呼ばず状態も変えない．
+    // 同一 mock・同一シードで会話なし 2 回が完全一致する (CommunicationPhase の no-op 性)．
+    let cfg = Config {
+        communication: false,
+        ..base_config()
+    };
+    let a = run_with_client(&cfg, scripted_const(7.0)).unwrap();
+    let b = run_with_client(&cfg, scripted_const(7.0)).unwrap();
+    let pa: Vec<f64> = a.rounds.iter().map(|r| r.price).collect();
+    let pb: Vec<f64> = b.rounds.iter().map(|r| r.price).collect();
+    assert_eq!(pa, pb, "会話なしは決定論的に完全再現すべき");
+    // CommunicationPhase が no-op なので LLM 呼び出しは価格決定ぶんのみ
+    // (n_firms * rounds; メッセージ呼び出しは 0)．
+    assert_eq!(
+        a.metadata.total(),
+        a.metrics.len() * cfg.n_firms,
+        "会話なしは価格決定ぶんの LLM 呼び出しのみ (メッセージ 0)"
+    );
+}
+
+// --------------------------------------------------------------------------- //
+// 非対称コスト: c2 > c1 → 高コスト社が高い価格 (非対称価格)
+// --------------------------------------------------------------------------- //
+
+#[test]
+fn asymmetric_cost_shifts_prices() {
+    // c1=2 < c2=5 → 低コスト社 (firm 0) が低い価格に分かれるべき．
+    let cfg = Config {
+        c1: 2.0,
+        c2: 5.0,
+        max_rounds: 80,
+        ..base_config()
+    };
+    let result = run_with_client(&cfg, scripted_midpoint()).unwrap();
+    // 最終ラウンドの firm 別価格を取り出す．
+    let last_round = result.rounds.iter().map(|r| r.round).max().unwrap();
+    let p0 = result
+        .rounds
+        .iter()
+        .find(|r| r.round == last_round && r.firm_id == 0)
+        .map(|r| r.price)
+        .unwrap();
+    let p1 = result
+        .rounds
+        .iter()
+        .find(|r| r.round == last_round && r.firm_id == 1)
+        .map(|r| r.price)
+        .unwrap();
+    assert!(
+        p1 > p0,
+        "高コスト社 (firm 1, c=5) は高コスト社が高価格になるべき: p0={p0}, p1={p1}"
+    );
+    // 対称コストでは一致することの対照確認．
+    let sym = Config {
+        c1: 2.0,
+        c2: 2.0,
+        max_rounds: 80,
+        ..base_config()
+    };
+    let sym_result = run_with_client(&sym, scripted_midpoint()).unwrap();
+    let sp0 = sym_result
+        .rounds
+        .iter()
+        .find(|r| {
+            r.round == sym_result.rounds.iter().map(|x| x.round).max().unwrap() && r.firm_id == 0
+        })
+        .map(|r| r.price)
+        .unwrap();
+    let sp1 = sym_result
+        .rounds
+        .iter()
+        .find(|r| {
+            r.round == sym_result.rounds.iter().map(|x| x.round).max().unwrap() && r.firm_id == 1
+        })
+        .map(|r| r.price)
+        .unwrap();
+    assert!(
+        (sp0 - sp1).abs() < 1e-6,
+        "対称コストは対称価格: {sp0} vs {sp1}"
+    );
+}
+
+// --------------------------------------------------------------------------- //
+// 会話あり mock の bit 決定論性 (同一シード + 同一 mock → 完全一致)
+// --------------------------------------------------------------------------- //
+
+#[test]
+fn communication_mode_is_deterministic() {
+    let cfg = Config {
+        communication: true,
+        max_rounds: 50,
+        ..base_config()
+    };
+    let a = run_with_client(&cfg, scripted_midpoint()).unwrap();
+    let b = run_with_client(&cfg, scripted_midpoint()).unwrap();
+    let pa: Vec<f64> = a.rounds.iter().map(|r| r.price).collect();
+    let pb: Vec<f64> = b.rounds.iter().map(|r| r.price).collect();
+    assert_eq!(pa, pb, "会話ありも同一シードは完全再現すべき");
 }

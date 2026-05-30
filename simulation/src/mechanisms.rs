@@ -30,7 +30,10 @@ use crate::config::LlmSettings;
 use crate::demand;
 use crate::llm::{llm_config, SabmClient};
 use crate::metrics::{is_stationary, mean, MetricRow, RoundRow};
-use crate::prompts::{parse_price, pricing_prompt, PricingBriefing};
+use crate::prompts::{
+    communication_prompt, parse_message, parse_price, pricing_prompt, CommunicationBriefing,
+    PricingBriefing,
+};
 use crate::world::{MarketWorld, RoundRecord};
 
 /// 共有 LLM クライアント (run ドライバとメカニズムで共有)．
@@ -71,7 +74,83 @@ impl Mechanism<MarketWorld> for MarketEnvironment {
 }
 
 // =========================================================================== //
-// 2. PricingDecision (Decision, LLM)
+// 2. CommunicationPhase (Environment, LLM; 会話あり代替モデルのみ)
+// =========================================================================== //
+
+/// 価格決定前に各社がメッセージを交換する «会話あり» フェーズ (`Environment`)．
+///
+/// 論文は «会話なし» (基本) と «会話あり» を対比し，会話は共謀を強める．本メカニズム
+/// は `communication = true` のときのみ LLM で各社のメッセージを生成し
+/// `world.messages` に書き込む (続く `PricingDecision` が相互注入する)．
+/// `communication = false` (基本モデル) では **完全な no-op** — LLM 呼び出しも
+/// 状態変更も生じないため，既定経路は会話機能追加前と bit 等価である．
+///
+/// Phase は `Environment` (= 価格決定 `Decision` より前) なので，registration 順に
+/// 依存せずメッセージが価格決定前に確定する (決定論)．
+pub struct CommunicationPhase {
+    client: SharedClient,
+    metadata: SharedMetadata,
+    settings: LlmSettings,
+}
+
+impl CommunicationPhase {
+    pub fn new(client: SharedClient, metadata: SharedMetadata, settings: LlmSettings) -> Self {
+        CommunicationPhase {
+            client,
+            metadata,
+            settings,
+        }
+    }
+}
+
+impl Mechanism<MarketWorld> for CommunicationPhase {
+    fn name(&self) -> &str {
+        "communication_phase"
+    }
+
+    fn phases(&self) -> &'static [Phase] {
+        &[Phase::Environment]
+    }
+
+    fn apply(&mut self, _phase: Phase, ctx: &mut StepContext<'_, MarketWorld>) -> Result<()> {
+        // 会話なし (基本モデル) は no-op: LLM も状態変更も発生させない (bit 等価)．
+        if !ctx.world.communication {
+            return Ok(());
+        }
+        let round = ctx.world.current_round();
+        let n = ctx.world.n_firms();
+        let mut new_messages = vec![String::new(); n];
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..n {
+            let brief = CommunicationBriefing {
+                firm_id: i,
+                round,
+                cost: ctx.world.costs[i],
+                persona: ctx.world.persona,
+                memory: &ctx.world.memory[i],
+                p_bertrand: ctx.world.p_bertrand[i],
+                p_cartel: ctx.world.p_cartel[i],
+            };
+            let prompt = communication_prompt(&brief);
+            let text = {
+                let mut client = self.client.borrow_mut();
+                let resp = client
+                    .complete(&prompt, &llm_config(&self.settings))
+                    .map_err(|e| {
+                        SocsimError::Mechanism(format!("communication LLM call failed: {e}"))
+                    })?;
+                self.metadata.borrow_mut().record(resp.metadata.clone());
+                resp.text
+            };
+            new_messages[i] = parse_message(&text).unwrap_or_default();
+        }
+        ctx.world.messages = new_messages;
+        Ok(())
+    }
+}
+
+// =========================================================================== //
+// 3. PricingDecision (Decision, LLM)
 // =========================================================================== //
 
 /// 各企業が履歴メモリ・ペルソナ・基準価格から次ラウンド価格を決定する
@@ -128,6 +207,7 @@ impl Mechanism<MarketWorld> for PricingDecision {
         for i in 0..n {
             let cost = ctx.world.costs[i];
             let fallback_price = ctx.world.prices[i];
+            let rival_messages = ctx.world.rival_messages(i);
             let brief = PricingBriefing {
                 firm_id: i,
                 round,
@@ -138,6 +218,7 @@ impl Mechanism<MarketWorld> for PricingDecision {
                 reflect,
                 p_bertrand: ctx.world.p_bertrand[i],
                 p_cartel: ctx.world.p_cartel[i],
+                rival_messages: &rival_messages,
             };
             let prompt = pricing_prompt(&brief);
             let text = {
@@ -349,6 +430,7 @@ mod tests {
             p_cartel: vec![8.0, 8.0],
             communication: false,
             persona: Persona::Active,
+            messages: vec![String::new(), String::new()],
         }
     }
 

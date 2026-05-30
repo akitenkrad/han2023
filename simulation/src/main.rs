@@ -46,8 +46,8 @@ enum Commands {
     Run(RunArgs),
     /// 差別化度 d/β × 企業数 を走査し最終 collusion index を集計する．
     Sweep(SweepArgs),
-    /// 論文 Fig.1/2/4 一括再現 (Phase 3; 現状はスタブ)．
-    Reproduce,
+    /// 論文 Fig.1/2/4 (暗黙の共謀への価格収束) を一括再現し PASS/off を判定する．
+    Reproduce(ReproduceArgs),
 }
 
 // --- 需要・コストの共通フラグ ---
@@ -222,6 +222,48 @@ struct SweepArgs {
     mock: bool,
 }
 
+#[derive(Parser, Debug)]
+struct ReproduceArgs {
+    #[command(flatten)]
+    market: MarketArgs,
+
+    /// 企業ペルソナ (active / aggressive / none)．
+    #[arg(long, default_value = "active")]
+    persona: String,
+
+    /// 最大ラウンド数 (--quick で 80 に縮約)．
+    #[arg(long, default_value_t = 300)]
+    max_rounds: usize,
+
+    /// 乱数シード基点 (シナリオごとに派生)．
+    #[arg(long, default_value_t = 42)]
+    seed: u64,
+
+    /// LLM 生成温度．
+    #[arg(long, default_value_t = 0.0)]
+    temperature: f32,
+
+    /// LLM 生成シード．
+    #[arg(long, default_value_t = 0)]
+    llm_seed: u64,
+
+    /// プロンプト→応答キャッシュの保存先．
+    #[arg(long, default_value = ".llm_cache/cache.json")]
+    cache_path: String,
+
+    /// 結果出力ベースディレクトリ．
+    #[arg(long, default_value = "results")]
+    output_dir: String,
+
+    /// ライブ LLM の代わりに scripted mock を使う (オフライン検証・CI 用)．
+    #[arg(long, default_value_t = false)]
+    mock: bool,
+
+    /// 短縮再現 (max_rounds=80; CI スモーク用)．
+    #[arg(long, default_value_t = false)]
+    quick: bool,
+}
+
 // ---------------------------------------------------------------------------
 // 補助
 // ---------------------------------------------------------------------------
@@ -294,6 +336,45 @@ fn last_own_price(prompt: &str) -> Option<f64> {
     found
 }
 
+/// プロンプト中の数値を `marker` 直後から拾う (mock ポリシー用)．
+///
+/// 小数点は 1 個だけ取り込む (文末ピリオド `8.00.` の 2 個目の `.` は数値に含めない)．
+fn number_after(prompt: &str, marker: &str) -> Option<f64> {
+    let idx = prompt.find(marker)?;
+    let rest = &prompt[idx + marker.len()..];
+    let mut num = String::new();
+    let mut seen_dot = false;
+    for c in rest.trim_start().chars() {
+        if c.is_ascii_digit() {
+            num.push(c);
+        } else if c == '.' && !seen_dot {
+            seen_dot = true;
+            num.push(c);
+        } else {
+            break;
+        }
+    }
+    // 末尾が小数点 (例: 文末の "8.") なら除く．
+    let trimmed = num.trim_end_matches('.');
+    trimmed.parse::<f64>().ok()
+}
+
+/// プロンプトに刻まれた «その企業の» Bertrand/cartel 中点を拾う (mock ポリシー用)．
+///
+/// `pricing_prompt` は各社のプロンプトに «Bertrand price is around p^B_i and the
+/// fully collusive ... price is around p^M_i» を埋め込む (firm_id 依存)．mock は
+/// この per-firm 値を読み，その企業固有の中点へ寄せる → 非対称コストでは各社の
+/// 中点が異なるため価格も非対称に分かれる (= 非対称コスト → 非対称価格を mock でも
+/// 構造的に再現)．取れない場合は引数 `fallback` (全社平均中点) を使う．
+fn prompt_midpoint(prompt: &str, fallback: f64) -> f64 {
+    let b = number_after(prompt, "Bertrand) price is around ");
+    let m = number_after(prompt, "monopoly/cartel) price is around ");
+    match (b, m) {
+        (Some(b), Some(m)) => 0.5 * (b + m),
+        _ => fallback,
+    }
+}
+
 /// 1 設定を実行する (`--mock` ならライブ LLM の代わりに scripted mock を使う)．
 ///
 /// mock ポリシーは «直近自社価格を中点 (Bertrand と cartel の中間) へ 50% 寄せる»
@@ -304,8 +385,16 @@ fn run_one(cfg: &Config, mock: bool) -> Result<SimulationResult, String> {
         let bench = compute_benchmarks(cfg);
         let target = 0.5 * (mean(&bench.p_bertrand) + mean(&bench.p_cartel));
         let backend = ScriptedClient::new("mock-llama3.2", move |prompt: &str| {
-            let last = last_own_price(prompt).unwrap_or(target);
-            let next = last + 0.5 * (target - last);
+            // 会話フェーズのプロンプト (## Message 節) には «協調の打診» メッセージを返す．
+            if prompt.contains("## Message") {
+                return "{\"message\": \"Let's both hold prices high to keep margins up.\"}"
+                    .to_string();
+            }
+            // 価格決定: その企業固有の (Bertrand, cartel) 中点へ 50% 寄せる «暗黙の共謀»
+            // 風ポリシー．per-firm 中点を読むので非対称コストでは価格も非対称に分かれる．
+            let firm_target = prompt_midpoint(prompt, target);
+            let last = last_own_price(prompt).unwrap_or(firm_target);
+            let next = last + 0.5 * (firm_target - last);
             format!("{{\"price\": {next:.4}}}")
         });
         let client = wrap_client(backend, PromptCache::in_memory());
@@ -649,15 +738,235 @@ fn cmd_sweep(args: SweepArgs) {
 }
 
 // ---------------------------------------------------------------------------
-// reproduce (Phase 3 スタブ)
+// reproduce (論文 Fig.1/2/4 一括再現)
 // ---------------------------------------------------------------------------
 
-fn cmd_reproduce() {
+/// `reproduce_summary.json` の 1 シナリオ行．
+#[derive(serde::Serialize)]
+struct ReproduceScenario {
+    /// シナリオ名 (no_communication / communication)．
+    name: &'static str,
+    /// 会話の有無．
+    communication: bool,
+    /// 観測した最終ラウンドの全社平均価格．
+    observed_avg_price: f64,
+    /// 観測した最終ラウンドの collusion index．
+    observed_collusion_index: f64,
+    /// 安定 (共謀) 到達ラウンド (なければ -1)．
+    rounds_to_stable: i64,
+    /// 実行ラウンド数．
+    final_round: usize,
+    /// 解析 Bertrand 価格 (全社平均)．
+    p_bertrand: f64,
+    /// 解析 cartel 価格 (全社平均)．
+    p_cartel: f64,
+    /// この結果を保存したサブディレクトリ (Python の図生成入力)．
+    results_subdir: String,
+}
+
+/// `reproduce_summary.json` のアンカー判定行．
+#[derive(serde::Serialize)]
+struct ReproduceAnchor {
+    name: String,
+    paper_value: String,
+    observed: f64,
+    target_lo: f64,
+    target_hi: f64,
+    pass: bool,
+}
+
+/// `reproduce_summary.json` のルート．
+#[derive(serde::Serialize)]
+struct ReproduceSummary {
+    command: &'static str,
+    paper: &'static str,
+    /// 解析アンカー (Bertrand=6, cartel=8; 基本設定)．
+    p_bertrand: f64,
+    p_cartel: f64,
+    mock: bool,
+    quick: bool,
+    scenarios: Vec<ReproduceScenario>,
+    anchors: Vec<ReproduceAnchor>,
+    n_pass: usize,
+    n_anchors: usize,
+}
+
+fn cmd_reproduce(args: ReproduceArgs) {
+    let persona = parse_persona(&args.persona).unwrap_or_else(|e| panic!("{}", e));
+    let max_rounds = if args.quick { 80 } else { args.max_rounds };
+
+    let ts = timestamp();
+    let out_dir = format!("{}/{}_reproduce", args.output_dir, ts);
+    ensure_output_dir(&out_dir);
+    if let Some(parent) = Path::new(&args.cache_path).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
     println!("=== Han, Wu & Xiao (2023) SABM 論文 Fig.1/2/4 一括再現 ===");
-    println!("reproduce は Phase 3 で実装予定です (現状はスタブ)．");
-    println!("会話あり/なしの収束水準・形成速度・滑らかさの比較を一括で行う計画です．");
-    println!("現時点では `run` (会話なし) / `sweep` (d/β・企業数) と Python tools の");
-    println!("`reproduce`・`visualize`・`visualize-sweep` を個別にご利用ください．");
+    println!(
+        "persona: {} | max_rounds: {} | mock: {} | quick: {}",
+        persona.label(),
+        max_rounds,
+        args.mock,
+        args.quick,
+    );
+    println!("出力先: {}", out_dir);
+    println!("-------------------------------------------------");
+
+    // 2 シナリオ: 会話なし (Fig.1) と 会話あり (Fig.2)．Fig.4 = 両者の収束水準/速度の差．
+    let scenarios_spec: [(&'static str, bool); 2] =
+        [("no_communication", false), ("communication", true)];
+
+    let mut scenarios: Vec<ReproduceScenario> = Vec::new();
+
+    for (name, communication) in scenarios_spec {
+        let subdir = format!("{}/{}", out_dir, name);
+        ensure_output_dir(&subdir);
+        let seed = socsim_core::derive_seed(args.seed, &[communication as u64]);
+        let cfg = Config {
+            n_firms: args.market.firms,
+            a: args.market.a,
+            beta: args.market.beta,
+            d: args.market.effective_d(),
+            c1: args.market.c1,
+            c2: args.market.c2,
+            persona,
+            communication,
+            max_rounds,
+            seed: Some(seed),
+            llm: LlmSettings {
+                temperature: args.temperature,
+                seed: args.llm_seed,
+                cache_path: Some(args.cache_path.clone()),
+            },
+            output_dir: subdir.clone(),
+            ..Config::default()
+        };
+
+        let result = run_one(&cfg, args.mock).unwrap_or_else(|e| panic!("実行に失敗: {}", e));
+
+        save_rounds(&result.rounds, &subdir);
+        save_metrics(&result.metrics, &subdir);
+        save_benchmarks(&result.benchmarks, &subdir);
+        save_llm_meta(&result, &cfg, &subdir);
+        let path = format!("{}/config.json", subdir);
+        write_json(&cfg.to_run_config_json(), &path).expect("config.json の書き込みに失敗");
+
+        scenarios.push(ReproduceScenario {
+            name,
+            communication,
+            observed_avg_price: result.final_avg_price(),
+            observed_collusion_index: result.final_collusion_index(),
+            rounds_to_stable: result.rounds_to_stable().map(|r| r as i64).unwrap_or(-1),
+            final_round: result.final_round,
+            p_bertrand: mean(&result.benchmarks.p_bertrand),
+            p_cartel: mean(&result.benchmarks.p_cartel),
+            results_subdir: name.to_string(),
+        });
+    }
+
+    let base = &scenarios[0]; // no_communication = 論文 Fig.1 の基本ケース．
+    let p_bertrand = base.p_bertrand;
+    let p_cartel = base.p_cartel;
+
+    // --- アンカー判定 (Bertrand(6)/cartel(8) フレーム) ---
+    let mut anchors: Vec<ReproduceAnchor> = Vec::new();
+    let mut push = |name: &str, paper: &str, obs: f64, lo: f64, hi: f64| {
+        anchors.push(ReproduceAnchor {
+            name: name.to_string(),
+            paper_value: paper.to_string(),
+            observed: obs,
+            target_lo: lo,
+            target_hi: hi,
+            pass: obs >= lo && obs <= hi,
+        });
+    };
+
+    // Fig.1 中核: 会話なしでも平均価格が (Bertrand, cartel) 区間内 (~7 に収束)．
+    push(
+        "no_comm avg_price in (p^B, p^M) (paper ~7)",
+        "~7.0",
+        base.observed_avg_price,
+        p_bertrand,
+        p_cartel,
+    );
+    // 暗黙の共謀: CI が中域 (論文帯 0.3-0.8)．
+    push(
+        "no_comm collusion_index (paper 0.3-0.8)",
+        "0.3-0.8",
+        base.observed_collusion_index,
+        0.3,
+        0.8,
+    );
+    // Fig.2/4: 会話ありは共謀を弱めない (CI が会話なし以上 — εマージン)．
+    let comm = &scenarios[1];
+    push(
+        "communication strengthens collusion (CI_comm >= CI_nocomm)",
+        "comm >= no-comm",
+        comm.observed_collusion_index - base.observed_collusion_index,
+        -0.05,
+        f64::INFINITY,
+    );
+
+    let n_pass = anchors.iter().filter(|a| a.pass).count();
+    let n_anchors = anchors.len();
+
+    println!("シナリオ:");
+    for s in &scenarios {
+        let stable = if s.rounds_to_stable >= 0 {
+            s.rounds_to_stable.to_string()
+        } else {
+            "未達".to_string()
+        };
+        println!(
+            "  [{:<16}] avg_price={:.3} CI={:.3} 安定到達={} (round {})",
+            s.name, s.observed_avg_price, s.observed_collusion_index, stable, s.final_round,
+        );
+    }
+    println!("-------------------------------------------------");
+    println!(
+        "フレーム: p_bertrand={:.3} p_cartel={:.3}",
+        p_bertrand, p_cartel
+    );
+    for a in &anchors {
+        let hi = if a.target_hi.is_infinite() {
+            "∞".to_string()
+        } else {
+            format!("{:.2}", a.target_hi)
+        };
+        println!(
+            "[{}] {:<48} obs={:.4} target=[{:.2},{}] paper={}",
+            if a.pass { "PASS" } else { "OFF " },
+            a.name,
+            a.observed,
+            a.target_lo,
+            hi,
+            a.paper_value,
+        );
+    }
+    println!("-------------------------------------------------");
+    println!("{}/{} アンカーが in-band", n_pass, n_anchors);
+
+    let summary = ReproduceSummary {
+        command: "reproduce",
+        paper: "Han, Wu & Xiao (2023) SABM — Fig.1/2/4 (tacit collusion ~7 between Bertrand 6 and cartel 8)",
+        p_bertrand,
+        p_cartel,
+        mock: args.mock,
+        quick: args.quick,
+        scenarios,
+        anchors,
+        n_pass,
+        n_anchors,
+    };
+    let path = format!("{}/reproduce_summary.json", out_dir);
+    write_json(&summary, &path).expect("reproduce_summary.json の書き込みに失敗");
+
+    let _ = refresh_latest_symlink(&args.output_dir, &format!("{}_reproduce", ts));
+
+    println!("サマリ → {}/reproduce_summary.json", out_dir);
+    println!("各シナリオの rounds.csv / metrics.csv / benchmarks.json を各サブディレクトリに保存しました．");
+    println!("図 (Fig.1/2/4 風) は `uv run sabm-tools reproduce` で生成できます．");
 }
 
 // ---------------------------------------------------------------------------
@@ -670,6 +979,6 @@ fn main() {
         Commands::Benchmark(args) => cmd_benchmark(args),
         Commands::Run(args) => cmd_run(args),
         Commands::Sweep(args) => cmd_sweep(args),
-        Commands::Reproduce => cmd_reproduce(),
+        Commands::Reproduce(args) => cmd_reproduce(args),
     }
 }

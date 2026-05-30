@@ -23,8 +23,8 @@ use crate::analytic::{bertrand_prices, cartel_prices};
 use crate::config::Config;
 use crate::llm::{build_live_client, SabmClient};
 use crate::mechanisms::{
-    MarketClearing, MarketEnvironment, MemoryUpdate, PricingDecision, ProfitReward, SharedClient,
-    SharedMetadata, SharedMetrics, SharedRounds,
+    CommunicationPhase, MarketClearing, MarketEnvironment, MemoryUpdate, PricingDecision,
+    ProfitReward, SharedClient, SharedMetadata, SharedMetrics, SharedRounds,
 };
 use crate::metrics::{mean, rounds_to_stable, MetricRow, RoundRow};
 use crate::world::MarketWorld;
@@ -130,6 +130,7 @@ pub fn init_world(cfg: &Config, rng: &mut SimRng) -> MarketWorld {
         p_cartel: bench.p_cartel,
         communication: cfg.communication,
         persona: cfg.persona,
+        messages: vec![String::new(); n],
     }
 }
 
@@ -167,6 +168,11 @@ pub fn run_with_client(
         .scheduler(Box::new(SequentialScheduler))
         .seed(derive_seed(root, &[RNG_ENGINE]))
         .add_mechanism(Box::new(MarketEnvironment))
+        .add_mechanism(Box::new(CommunicationPhase::new(
+            Rc::clone(&shared_client),
+            Rc::clone(&shared_meta),
+            cfg.llm.clone(),
+        )))
         .add_mechanism(Box::new(PricingDecision::new(
             Rc::clone(&shared_client),
             Rc::clone(&shared_meta),

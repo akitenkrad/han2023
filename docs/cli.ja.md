@@ -33,11 +33,13 @@ cargo run --release -- benchmark --a 14 --beta 0.0066667 --d 0.0033333 --c1 2 --
 ## `run` — LLM 駆動の繰り返し価格ゲーム
 
 ```bash
-cargo run --release -- run --firms 2 --persona active --communication false \
+cargo run --release -- run --firms 2 --persona active \
     --max-rounds 1000 --temperature 0 --seed 42
 ```
 
 上記の市場フラグに加えて: `--persona {active,aggressive,none}`・`--communication`・`--max-rounds`・`--reflection-period` (既定 20)・`--memory-window` (既定 20)・`--runs`・`--seed`・`--temperature`・`--llm-seed`・`--cache-path`・`--output-dir`・`--mock` (ライブ LLM の代わりに scripted オフラインクライアントを使う — CI / サンドボックス用)．
+
+`--communication` は**フラグ**型 (付ければ会話あり; 付けなければ論文の会話なし基本ケース)．付けると価格決定の前に `CommunicationPhase` が走り，各社が短い cheap-talk メッセージを発して次ラウンドの価格プロンプトへ注入される．ペルソナ (`--persona`) と非対称限界費用 (`--c1` / `--c2`) は結果の価格をずらす — 高コスト社ほど高い価格に収束する．
 
 `rounds.csv`・`metrics.csv`・`benchmarks.json`・`llm_meta.json`・`config.json` を書き出し `results/latest` を更新する．
 
@@ -51,9 +53,14 @@ cargo run --release -- sweep \
 
 フラグ: `--d-beta-values`・`--firms-values`・`--a`・`--beta`・`--cost`・`--persona`・`--communication`・`--max-rounds`・`--runs`・`--seed`・`--temperature`・`--llm-seed`・`--cache-path`・`--output-dir`・`--mock`．`sweep_summary.csv` + `sweep_config.json` を書き出す．
 
-## `reproduce` — 論文 Fig.1/2/4 一括再現 (Phase 3 スタブ)
+## `reproduce` — 論文 Fig.1/2/4 一括再現
 
-案内を表示する．一括再現は Phase 3 で実装予定．
+```bash
+cargo run --release -- reproduce --seed 42            # 実 LLM
+cargo run --release -- reproduce --seed 42 --mock --quick   # オフライン・80 ラウンド
+```
+
+会話なし baseline (Fig.1) と会話あり変種 (Fig.2) を実行し，観測した平均価格と collusion index をベルトラン(6)/カルテル(8) フレームと照合して `reproduce_summary.json` (シナリオごとの `observed_avg_price` / `observed_collusion_index`，解析フレーム，PASS/off アンカー) と各シナリオの `rounds.csv` / `metrics.csv` / `benchmarks.json` を `<ts>_reproduce/` 配下に書き出す．フラグ: 上記の市場フラグ・`--persona`・`--max-rounds`・`--seed`・`--temperature`・`--llm-seed`・`--cache-path`・`--output-dir`・`--mock`・`--quick`．図は `uv run sabm-tools reproduce` で描画する．
 
 ## オフラインスモーク (ライブ LLM 不要)
 

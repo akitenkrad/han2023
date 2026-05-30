@@ -68,9 +68,34 @@ cargo run --release -- sweep \
 uv run sabm-tools visualize-sweep
 ```
 
+### Paper reproduction (Fig.1/2/4)
+
+`reproduce` runs the no-communication baseline (Fig.1) and the communication variant (Fig.2) in one shot, compares the observed average price and collusion index against the Bertrand(6)/cartel(8) frame, and writes a `reproduce_summary.json` (observed avg_price / collusion index vs paper + PASS/off). The Python `reproduce` tool then renders the headline figures into `<results>/figures/`.
+
+```bash
+# Live LLM end-to-end (or add --mock for offline); --quick caps rounds at 80
+cargo run --release -- reproduce --seed 42
+uv run sabm-tools reproduce            # renders fig1/fig2/fig4 + prints the PASS table
+
+# Offline (no-LLM) reproduction in one command
+uv run sabm-tools reproduce --run --mock --quick
+```
+
+### Communication variant & persona / asymmetric-cost variants
+
+```bash
+# "With communication": each round firms exchange a cheap-talk message (CommunicationPhase)
+# before the simultaneous pricing decision. --communication is a flag (default = no communication).
+cargo run --release -- run --communication --persona active --max-rounds 1000 --seed 42
+
+# Persona selector (active / aggressive / none) and asymmetric marginal costs (c2 ≠ c1):
+# a higher-cost firm settles at a higher price (asymmetric cost → asymmetric prices).
+cargo run --release -- run --persona aggressive --c1 2 --c2 5 --max-rounds 1000 --seed 42
+```
+
 ## Scope
 
-This repository currently implements **Phase 1** (the `MarketWorld` + five mechanisms over the six-phase loop, the analytic Bertrand/cartel benchmarks, the LLM pricing-decision layer with Ollama→OpenAI fallback + caching, the `benchmark` and `run` subcommands, and the tacit-collusion / collusion-index metrics) and **Phase 2** (the `sweep` over product-differentiation `d/β` × firm count, plus the Python `visualize` / `visualize-sweep` / `show-experiment-settings` tools). The communication-enabled alternative model (3-phase rounds), the persona/asymmetric-cost variants and the one-shot paper reproduction (`reproduce`, Fig.1/2/4 batch) are left as future work (Phase 3); clean extension points are kept throughout, including a `communication` flag, a persona selector and a `reproduce` stub.
+This repository implements the full SABM model: the `MarketWorld` + mechanisms over the six-phase loop, the analytic Bertrand/cartel benchmarks, the LLM pricing-decision layer with Ollama→OpenAI fallback + caching, the tacit-collusion / collusion-index metrics, the `sweep` over product-differentiation `d/β` × firm count, the **communication-enabled** variant (a `CommunicationPhase` cheap-talk message exchange before pricing, toggled by `--communication`), per-firm **personas** and **asymmetric marginal costs** (`c2 ≠ c1`), and the one-shot paper reproduction (`reproduce`, Fig.1/2/4 batch with PASS/off anchors). The Python `sabm-tools` provide `visualize` / `visualize-sweep` / `show-experiment-settings` / `reproduce`. The default path (no communication, symmetric costs, `active` persona) is the paper's basic case and is bit-identical to the pre-variant core given a seed.
 
 ## Documentation
 

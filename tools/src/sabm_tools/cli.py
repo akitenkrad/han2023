@@ -35,7 +35,7 @@ main = build_dispatcher(
             "sabm_tools.show_experiment_settings:main",
         ),
         "reproduce": (
-            "論文 Fig.1/2/4 一括再現 (Phase 3; 現状はスタブ案内)",
+            "論文 Fig.1/2/4 一括再現 (会話なし/あり 価格軌跡 + CI 比較 + PASS 判定)",
             "sabm_tools.reproduce_paper:main",
         ),
     },

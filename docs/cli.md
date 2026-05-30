@@ -33,11 +33,13 @@ cargo run --release -- benchmark --a 14 --beta 0.0066667 --d 0.0033333 --c1 2 --
 ## `run` — LLM-driven repeated pricing game
 
 ```bash
-cargo run --release -- run --firms 2 --persona active --communication false \
+cargo run --release -- run --firms 2 --persona active \
     --max-rounds 1000 --temperature 0 --seed 42
 ```
 
 Adds, on top of the market flags above: `--persona {active,aggressive,none}`, `--communication`, `--max-rounds`, `--reflection-period` (default 20), `--memory-window` (default 20), `--runs`, `--seed`, `--temperature`, `--llm-seed`, `--cache-path`, `--output-dir`, and `--mock` (use a scripted offline client instead of a live LLM — for CI / sandboxes).
+
+`--communication` is a **flag** (present = communication on; absent = the paper's no-communication basic case). When set, a `CommunicationPhase` runs before each pricing decision: every firm emits a short cheap-talk message that is injected into the next round's pricing prompts. Personas (`--persona`) and asymmetric marginal costs (`--c1` / `--c2`) shift the resulting prices — a higher-cost firm settles at a higher price.
 
 Writes `rounds.csv`, `metrics.csv`, `benchmarks.json`, `llm_meta.json`, `config.json` and refreshes `results/latest`.
 
@@ -51,9 +53,14 @@ cargo run --release -- sweep \
 
 Flags: `--d-beta-values`, `--firms-values`, `--a`, `--beta`, `--cost`, `--persona`, `--communication`, `--max-rounds`, `--runs`, `--seed`, `--temperature`, `--llm-seed`, `--cache-path`, `--output-dir`, `--mock`. Writes `sweep_summary.csv` + `sweep_config.json`.
 
-## `reproduce` — paper Fig.1/2/4 batch (Phase 3 stub)
+## `reproduce` — paper Fig.1/2/4 batch
 
-Prints guidance; the batch reproduction is planned for Phase 3.
+```bash
+cargo run --release -- reproduce --seed 42            # live LLM
+cargo run --release -- reproduce --seed 42 --mock --quick   # offline, 80 rounds
+```
+
+Runs the no-communication baseline (Fig.1) and the communication variant (Fig.2), compares the observed average price and collusion index against the Bertrand(6)/cartel(8) frame, and writes a `reproduce_summary.json` (per-scenario `observed_avg_price` / `observed_collusion_index`, the analytic frame, and PASS/off anchors) plus per-scenario `rounds.csv` / `metrics.csv` / `benchmarks.json` under a `<ts>_reproduce/` directory. Flags: the market flags above, `--persona`, `--max-rounds`, `--seed`, `--temperature`, `--llm-seed`, `--cache-path`, `--output-dir`, `--mock`, `--quick`. Render the figures with `uv run sabm-tools reproduce`.
 
 ## Offline smoke (no live LLM)
 

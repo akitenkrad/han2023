@@ -113,10 +113,17 @@ pub struct MarketWorld {
     pub p_bertrand: Vec<f64>,
     /// 解析ベンチマーク: カルテル (独占) 価格 (firm_id 順)．
     pub p_cartel: Vec<f64>,
-    /// 会話の有無 (基本モデル = false; 会話あり代替モデルは Phase 3)．
+    /// 会話の有無 (基本モデル = false; 会話あり代替モデルは `CommunicationPhase`)．
     pub communication: bool,
     /// 企業ペルソナ (active / aggressive / none)．
     pub persona: Persona,
+    /// 直前の会話フェーズで各社が発したメッセージ (index = firm_id)．
+    ///
+    /// 会話あり代替モデル (`communication = true`) でのみ `CommunicationPhase` が
+    /// 書き込み，続く `PricingDecision` がプロンプトに注入する．会話なし (基本
+    /// モデル) では全要素が空文字列のまま (LLM 呼び出しもプロンプト差分も生じない
+    /// → 既定経路は bit 等価)．
+    pub messages: Vec<String>,
 }
 
 impl MarketWorld {
@@ -149,6 +156,18 @@ impl MarketWorld {
             .enumerate()
             .filter(|(j, _)| *j != i)
             .map(|(_, p)| *p)
+            .collect()
+    }
+
+    /// 企業 `i` を除く相手社が直前の会話フェーズで発したメッセージ (firm_id 順)．
+    ///
+    /// 会話なし (基本モデル) では空文字列が並ぶ (= プロンプトに会話節を出さない)．
+    pub fn rival_messages(&self, i: usize) -> Vec<String> {
+        self.messages
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, m)| m.clone())
             .collect()
     }
 }
@@ -195,9 +214,11 @@ mod tests {
             p_cartel: vec![8.0, 8.0],
             communication: false,
             persona: Persona::Active,
+            messages: vec![String::new(), String::new()],
         };
         assert_eq!(w.agent_ids(), vec![AgentId(0), AgentId(1)]);
         assert_eq!(w.rival_prices(0), vec![6.0]);
         assert!((w.avg_price() - 6.0).abs() < 1e-12);
+        assert_eq!(w.rival_messages(0), vec![String::new()]);
     }
 }

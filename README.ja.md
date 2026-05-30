@@ -68,9 +68,34 @@ cargo run --release -- sweep \
 uv run sabm-tools visualize-sweep
 ```
 
+### 論文再現 (Fig.1/2/4)
+
+`reproduce` は会話なし baseline (Fig.1) と会話あり変種 (Fig.2) を一括実行し，観測した平均価格と collusion index をベルトラン(6)/カルテル(8) フレームと照合して `reproduce_summary.json` (観測 avg_price / collusion index と論文値 + PASS/off) を書き出す．Python `reproduce` ツールが headline 図を `<results>/figures/` に描画する．
+
+```bash
+# 実 LLM で end-to-end (オフラインなら --mock; --quick で 80 ラウンドに短縮)
+cargo run --release -- reproduce --seed 42
+uv run sabm-tools reproduce            # fig1/fig2/fig4 を描画し PASS テーブルを表示
+
+# オフライン (LLM 不要) 再現を 1 コマンドで
+uv run sabm-tools reproduce --run --mock --quick
+```
+
+### 会話あり変種・ペルソナ / 非対称コスト変種
+
+```bash
+# 「会話あり」: 各ラウンドで価格決定前に企業が cheap-talk メッセージを交換する
+# (CommunicationPhase)．--communication はフラグ型 (既定 = 会話なし)．
+cargo run --release -- run --communication --persona active --max-rounds 1000 --seed 42
+
+# ペルソナ選択 (active / aggressive / none) と非対称限界費用 (c2 ≠ c1):
+# 高コスト社ほど高い価格に収束する (非対称コスト → 非対称価格)．
+cargo run --release -- run --persona aggressive --c1 2 --c2 5 --max-rounds 1000 --seed 42
+```
+
 ## スコープ
 
-本リポジトリは現状 **Phase 1** (`MarketWorld` + 6-phase ループ上の 5 メカニズム，解析的なベルトラン/カルテルベンチマーク，Ollama→OpenAI フォールバック + キャッシュの LLM 価格決定レイヤ，`benchmark`・`run` サブコマンド，暗黙の共謀 / collusion index 指標) と **Phase 2** (製品差別化度 `d/β` × 企業数 の `sweep`，Python `visualize` / `visualize-sweep` / `show-experiment-settings` ツール) を実装している．会話あり代替モデル (3 フェーズ化)・ペルソナ/非対称コスト変種・論文 Fig.1/2/4 一括再現 (`reproduce`) は今後の課題 (Phase 3) とし，`communication` フラグ・ペルソナ選択・`reproduce` スタブなど拡張点を随所に残している．
+本リポジトリは SABM モデルを全面的に実装している: `MarketWorld` + 6-phase ループ上のメカニズム，解析的なベルトラン/カルテルベンチマーク，Ollama→OpenAI フォールバック + キャッシュの LLM 価格決定レイヤ，暗黙の共謀 / collusion index 指標，製品差別化度 `d/β` × 企業数 の `sweep`，**会話あり**変種 (価格決定前に cheap-talk メッセージを交換する `CommunicationPhase`; `--communication` で切替),企業ごとの**ペルソナ**と**非対称限界費用** (`c2 ≠ c1`),論文 Fig.1/2/4 一括再現 (`reproduce`; PASS/off アンカー付き)．Python `sabm-tools` は `visualize` / `visualize-sweep` / `show-experiment-settings` / `reproduce` を提供する．既定経路 (会話なし・対称コスト・`active` ペルソナ) は論文の基本ケースであり，同一シードでは変種追加前のコアと bit 等価である．
 
 ## ドキュメント
 

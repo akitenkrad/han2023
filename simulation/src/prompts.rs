@@ -29,6 +29,112 @@ pub struct PricingBriefing<'a> {
     /// 解析ベンチマーク (再現性検証用にプロンプトへ参考提示する; 任意)．
     pub p_bertrand: f64,
     pub p_cartel: f64,
+    /// 直前の会話フェーズで相手社が発したメッセージ (firm_id 順; 会話ありのみ)．
+    ///
+    /// 会話なし (基本モデル) では空スライスを渡す (= プロンプトに会話節を出さない)．
+    pub rival_messages: &'a [String],
+}
+
+/// 会話フェーズ (`CommunicationPhase`) で 1 企業がメッセージを生成するブリーフィング．
+///
+/// 会話あり代替モデルのみで使う．各社はこのプロンプトで «相手に送る短い一言»
+/// (価格意図の表明・協調の打診など) を生成し，続く `PricingDecision` で相互に
+/// 注入される．論文の「会話あり条件は共謀を強める」を捉える．
+pub struct CommunicationBriefing<'a> {
+    /// 企業 index (firm_id; 0 始まり)．
+    pub firm_id: usize,
+    /// このラウンド番号 (0 始まり)．
+    pub round: u64,
+    /// 自社の限界費用 c_i．
+    pub cost: f64,
+    /// ペルソナ．
+    pub persona: Persona,
+    /// 直近の境界付きメモリ (最大 window 件; 古い順)．
+    pub memory: &'a [RoundRecord],
+    /// 解析ベンチマーク (参考提示)．
+    pub p_bertrand: f64,
+    pub p_cartel: f64,
+}
+
+/// 会話フェーズのメッセージ生成プロンプトを構築する (会話あり代替モデル)．
+///
+/// LLM には «相手企業へ送る 1〜2 文の短いメッセージ» を JSON で答えさせる．
+/// 価格意図・協調の打診を表明できる (拘束力はない; 続く価格決定は各社独立)．
+pub fn communication_prompt(brief: &CommunicationBriefing) -> String {
+    let mut s = String::new();
+    s.push_str("## General Information\n");
+    s.push_str(
+        "You manage a firm selling a differentiated product against a rival firm in a repeated \
+         pricing game. Before this round's prices are set, you may send a short message to your \
+         rival. Messages are cheap talk: they are not binding and your rival may ignore them.\n\n",
+    );
+    s.push_str(&format!(
+        "## Round Rules\n- This is round {}.\n",
+        brief.round
+    ));
+    s.push_str(&format!(
+        "- Your marginal cost is {:.2} per unit.\n",
+        brief.cost
+    ));
+    s.push_str(&format!(
+        "- For reference, the competitive (Bertrand) price is around {:.2} and the fully \
+         collusive (monopoly/cartel) price is around {:.2}.\n\n",
+        brief.p_bertrand, brief.p_cartel
+    ));
+    s.push_str(
+        "## Objective\nMaximize your firm's cumulative profit over the long run. You may use the \
+         message to coordinate toward higher, more profitable prices.\n\n",
+    );
+    let directive = brief.persona.directive();
+    if !directive.is_empty() {
+        s.push_str("## Persona\n");
+        s.push_str(directive);
+        s.push_str("\n\n");
+    }
+    if brief.memory.is_empty() {
+        s.push_str("## History\nThis is the first round; there is no history yet.\n\n");
+    } else {
+        let avg_price =
+            brief.memory.iter().map(|r| r.own_price).sum::<f64>() / brief.memory.len() as f64;
+        s.push_str(&format!(
+            "## History\nYour recent average price was {avg_price:.2}.\n\n"
+        ));
+    }
+    s.push_str(
+        "## Message\n\
+         Write a single short message (one or two sentences) to your rival about pricing this \
+         round.\n\
+         Answer with JSON only, e.g. {\"message\": \"Let's both hold prices high near 8 to keep \
+         margins up.\"}\n",
+    );
+    s
+}
+
+/// 会話メッセージ応答をパースする (JSON `{\"message\": \"…\"}` → 本文フォールバック)．
+///
+/// 1. JSON `{"message": "…"}` を試す (`msg` / `text` キーも許容)．
+/// 2. 失敗時は本文全体を 1 行へ畳んだものを使う (空なら `None`)．
+pub fn parse_message(text: &str) -> Option<String> {
+    if let Some(json) = extract_json_object(text) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
+            if let Some(obj) = v.as_object() {
+                for k in ["message", "msg", "text"] {
+                    if let Some(m) = obj.get(k).and_then(|x| x.as_str()) {
+                        let m = m.trim();
+                        if !m.is_empty() {
+                            return Some(m.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        None
+    } else {
+        Some(collapsed)
+    }
 }
 
 /// 価格決定プロンプトを構築する (論文 §4.3 の 5 節 + 履歴)．
@@ -88,6 +194,24 @@ pub fn pricing_prompt(brief: &PricingBriefing) -> String {
         s.push_str("## Persona\n");
         s.push_str(directive);
         s.push_str("\n\n");
+    }
+
+    // --- Communication (会話あり代替モデルのみ; rival messages を注入) ---
+    let rival_msgs: Vec<&str> = brief
+        .rival_messages
+        .iter()
+        .map(|m| m.trim())
+        .filter(|m| !m.is_empty())
+        .collect();
+    if brief.communication && !rival_msgs.is_empty() {
+        s.push_str("## Communication (messages from your rival this round)\n");
+        for (k, m) in rival_msgs.iter().enumerate() {
+            s.push_str(&format!("- rival {}: \"{}\"\n", k, m));
+        }
+        s.push_str(
+            "Take these messages into account, but remember the rival cannot bind you and may \
+             act in their own interest.\n\n",
+        );
     }
 
     // --- History (bounded memory, last 20) ---
@@ -257,6 +381,7 @@ mod tests {
             reflect: false,
             p_bertrand: 6.0,
             p_cartel: 8.0,
+            rival_messages: &[],
         };
         let p = pricing_prompt(&brief);
         assert!(p.contains("General Information"));
@@ -280,8 +405,65 @@ mod tests {
             reflect: false,
             p_bertrand: 6.0,
             p_cartel: 8.0,
+            rival_messages: &[],
         };
         let p = pricing_prompt(&brief);
         assert!(!p.contains("## Persona"));
+    }
+
+    #[test]
+    fn communication_section_injected_only_when_enabled() {
+        let rivals = vec!["Let's hold prices high near 8.".to_string()];
+        let with_comm = PricingBriefing {
+            firm_id: 0,
+            round: 2,
+            cost: 2.0,
+            persona: Persona::Active,
+            communication: true,
+            memory: &[],
+            reflect: false,
+            p_bertrand: 6.0,
+            p_cartel: 8.0,
+            rival_messages: &rivals,
+        };
+        let p = pricing_prompt(&with_comm);
+        assert!(p.contains("## Communication"), "comm section present: {p}");
+        assert!(p.contains("hold prices high"));
+        // communication=false → 会話節は出さない (既定経路は bit 等価)．
+        let no_comm = PricingBriefing {
+            communication: false,
+            ..with_comm
+        };
+        let p2 = pricing_prompt(&no_comm);
+        assert!(!p2.contains("## Communication"));
+    }
+
+    #[test]
+    fn parses_message_json_and_prose() {
+        assert_eq!(
+            parse_message("{\"message\": \"hold near 8\"}").as_deref(),
+            Some("hold near 8")
+        );
+        assert_eq!(
+            parse_message("hold   near 8").as_deref(),
+            Some("hold near 8")
+        );
+        assert_eq!(parse_message("   ").as_deref(), None);
+    }
+
+    #[test]
+    fn communication_prompt_has_message_section() {
+        let brief = CommunicationBriefing {
+            firm_id: 0,
+            round: 1,
+            cost: 2.0,
+            persona: Persona::Active,
+            memory: &[],
+            p_bertrand: 6.0,
+            p_cartel: 8.0,
+        };
+        let p = communication_prompt(&brief);
+        assert!(p.contains("## Message"));
+        assert!(p.contains("\"message\""));
     }
 }

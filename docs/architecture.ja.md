@@ -15,9 +15,9 @@ han2023/
 │   │   ├── demand.rs           # 線形需要 q_i・利益 π_i (決定論コア)
 │   │   ├── analytic.rs         # ベルトラン均衡・カルテル価格 (決定論・厳密)
 │   │   ├── world.rs            # MarketWorld (WorldState)・Persona・RoundRecord
-│   │   ├── mechanisms.rs       # 6-phase ループ上の 5 メカニズム
+│   │   ├── mechanisms.rs       # 6-phase ループ上の 6 メカニズム
 │   │   ├── llm.rs              # socsim-llm 合成 (Ollama→OpenAI + キャッシュ)
-│   │   ├── prompts.rs          # 価格決定プロンプト (5 節 + 境界付き履歴) + パース
+│   │   ├── prompts.rs          # 価格決定プロンプト + 会話 (cheap-talk) プロンプト + パース
 │   │   ├── metrics.rs          # rounds/metrics 行・収束判定
 │   │   ├── simulation.rs       # init_world + run ドライバ (SimulationBuilder 配線)
 │   │   └── lib.rs
@@ -31,12 +31,13 @@ han2023/
 
 差別化財の**ベルトラン複占** (既定 2 社) 繰り返し価格ゲーム．非空間・非ネットワークで，企業は市場 (需要分割) を介してのみ相互作用するため，`socsim-core` + `socsim-engine` + `socsim-llm` のみに依存する (`socsim-grid` / `socsim-net` 不要)．
 
-論文の 1 ラウンド = socsim の 1 tick．ラウンドを 5 メカニズムへ分割し 6-phase ループへ割り当てる:
+論文の 1 ラウンド = socsim の 1 tick．ラウンドを 6 メカニズムへ分割し 6-phase ループへ割り当てる:
 
 | Mechanism | Phase | 役割 |
 |-----------|-------|------|
 | `MarketEnvironment` | `Environment` | ラウンド冒頭の市場確認・需要量バッファのリセット |
-| `PricingDecision`   | `Decision`    | **LLM 所在**: 各社の次価格を境界付きメモリ + ペルソナ + 基準価格から決定．両社*同時*設定 (同期一括代入)．20 ラウンドごとに reflection |
+| `CommunicationPhase` | `Environment` | **会話変種のみ** (`--communication`): 各社が価格決定前に LLM で cheap-talk メッセージを発し，次の価格プロンプトへ注入する．会話なしでは完全な **no-op** (LLM 呼び出しも状態変更もなし → 既定経路は bit 等価) |
+| `PricingDecision`   | `Decision`    | **LLM 所在**: 各社の次価格を境界付きメモリ + ペルソナ + 基準価格 (+ 会話ありなら相手のメッセージ) から決定．両社*同時*設定 (同期一括代入)．20 ラウンドごとに reflection |
 | `MarketClearing`    | `Interaction` | 線形需要 `q_i = (α − β p_i + d Σ_{j≠i} p_j) / b` |
 | `ProfitReward`      | `Reward`      | 利益 `π_i = (p_i − c_i) q_i`・collusion index・収束/有界振動で `request_stop()` |
 | `MemoryUpdate`      | `PostStep`    | ラウンド記録を追記し直近 20 件に切り詰める |
