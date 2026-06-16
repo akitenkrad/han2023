@@ -36,6 +36,10 @@ use socsim_llm::PromptCache;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+
+    /// Ollama 接続先 URL（指定時は環境変数 OLLAMA_HOST を上書きする）．
+    #[arg(long, global = true)]
+    ollama_host: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -975,6 +979,9 @@ fn cmd_reproduce(args: ReproduceArgs) {
 
 fn main() {
     let cli = Cli::parse();
+    if let Some(host) = cli.ollama_host.as_deref() {
+        std::env::set_var("OLLAMA_HOST", host);
+    }
     match cli.command {
         Commands::Benchmark(args) => cmd_benchmark(args),
         Commands::Run(args) => cmd_run(args),
