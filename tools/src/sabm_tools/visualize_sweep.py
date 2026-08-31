@@ -2,13 +2,16 @@
 """
 visualize_sweep.py — Han, Wu & Xiao (2023) SABM スイープ結果 可視化スクリプト
 
-results/latest (または --sweep_dir 指定先) の sweep_summary.csv を読み，
-製品差別化度 d/β × 企業数 の格子について最終 collusion index を集計し，
-折れ線グラフ (d/β 別 / 企業数別) とヒートマップ (d/β × 企業数) で可視化する．
+製品差別化度 d/β × 企業数 の格子について最終 collusion index を集計し，折れ線
+グラフ (d/β 別 / 企業数別) とヒートマップ (d/β × 企業数) で可視化する．
+
+1 行 1 試行の表は，スイープ親 run の子 (`subcommand=sweep-point`) の
+`events.jsonl` から組み直す．平均を採るには条件ごとの集約ではなく個々の試行が
+要るので，子 run の run スコープ集約ではなく終端イベントを読む．
 
 Usage:
     uv run sabm-tools visualize-sweep
-    uv run sabm-tools visualize-sweep --sweep_dir results/20260525_120000_sweep
+    uv run sabm-tools visualize-sweep --sweep-dir "$(runvault path --experiment sabm --latest --subcommand sweep)"
 
 Outputs:
     output_dir/
@@ -24,6 +27,7 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from runvault.read import figures_dir, runvault_path, sweep_events_table
 
 plt.rcParams["font.family"] = "Hiragino Sans"
 
@@ -32,11 +36,13 @@ FIRM_COLORS = ["#FF9800", "#03A9F4", "#8BC34A", "#E91E63", "#795548"]
 
 
 def load_summary(sweep_dir: str) -> pd.DataFrame:
-    """sweep_summary.csv を読み込む．"""
-    path = os.path.join(sweep_dir, "sweep_summary.csv")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"sweep_summary.csv が見つかりません: {path}")
-    return pd.read_csv(path)
+    """1 行 1 試行の表を，スイープ親 run の子の終端イベントから組み直す．
+
+    runvault はこの表をディスク上に持たない (旧 `sweep_summary.csv` に相当)．条件
+    (firms / d_beta) は子 run の `parameters` が，試行ごとの最終値は `events.jsonl` の
+    `terminal` 行が持つ．
+    """
+    return sweep_events_table(sweep_dir, ["firms", "d_beta"], kind="terminal")
 
 
 def save_ci_by_dbeta(df: pd.DataFrame, out_path: str) -> None:
@@ -111,16 +117,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Han, Wu & Xiao (2023) SABM スイープ結果 可視化スクリプト",
     )
     p.add_argument(
-        "--sweep_dir",
         "--sweep-dir",
-        default="results/latest",
-        help="スイープ出力ディレクトリ (default: results/latest)",
+        "--sweep_dir",
+        default=None,
+        help=(
+            "スイープ親 run のディレクトリ．未指定時は runvault に最新の sweep を聞く "
+            "(--experiment sabm --subcommand sweep)．"
+        ),
     )
     p.add_argument(
-        "--output_dir",
+        "--results-root",
+        "--results_root",
+        default="results",
+        help="--sweep-dir 未指定時に runvault が探す results ルート (default: results)",
+    )
+    p.add_argument(
         "--output-dir",
+        "--output_dir",
         default=None,
-        help="図の保存先ディレクトリ (default: {sweep_dir}/figures)",
+        help="図の保存先ディレクトリ (default: results/sabm/figures/{run_slug})",
     )
     return p.parse_args(argv)
 
@@ -128,16 +143,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
-    out_dir = args.output_dir if args.output_dir else os.path.join(args.sweep_dir, "figures")
+    sweep_dir = args.sweep_dir
+    if sweep_dir is None:
+        sweep_dir = runvault_path("sabm", args.results_root, subcommand="sweep")
+
+    out_dir = args.output_dir if args.output_dir else figures_dir(sweep_dir)
     os.makedirs(out_dir, exist_ok=True)
 
     print("=== Han, Wu & Xiao (2023) SABM スイープ可視化 ===")
-    print(f"スイープ: {args.sweep_dir}")
+    print(f"スイープ: {sweep_dir}")
     print(f"出力先:   {out_dir}")
     print("-------------------------------------------------")
 
-    print("[1/2] sweep_summary.csv を読み込み中 ...")
-    df = load_summary(args.sweep_dir)
+    print("[1/2] 子 run の終端イベントを読み込み中 ...")
+    df = load_summary(sweep_dir)
     print(
         f"      d/β {df['d_beta'].nunique()} 種 × 企業数 {df['firms'].nunique()} 種 "
         f"({len(df)} 実行)"

@@ -11,7 +11,7 @@ LLM 出力は socsim の bit 再現性の **外側** にある．そこで設計
 - **決定論的 socsim コア** — 解析的なベルトラン均衡価格・カルテル/独占価格 (`p^B`, `p^M`)，線形需要の市場クリアリング (`q_i = (α − β p_i + d Σ_{j≠i} p_j) / b`)，利益 (`π_i = (p_i − c_i) q_i`)，collusion index (`CI = (p − p^B) / (p^M − p^B)`)，収束/有界振動の停止判定，境界付き 20 ラウンドメモリ更新．seed を固定すれば bit 単位で再現する (ChaCha20 `SimRng`)．解析パスは**定量的に厳密**で，基本設定では `p^B = 6`, `p^M = 8`．
 - **非決定的 LLM レイヤ** — `Decision` メカニズム 1 つ (`PricingDecision`)．各社の次ラウンド価格を，境界付き履歴・ペルソナ・基準価格から LLM が決める．`socsim-llm` の `CachingClient` (`hash(prompt+model)` → 応答キャッシュ)・`temperature=0`・固定 seed で擬似決定論化する．プロバイダ順は `socsim-llm` の `FallbackClient` による **Ollama 第一 → OpenAI フォールバック**．
 
-再現性の本体はモデルではなく**キャッシュ**である．ウォームキャッシュは同一応答を再生するため，再実行は無料かつ安定する．各実行は `llm_meta.json` にモデル・endpoint・温度・seed・cache-hit 率を記録する．ローカル既定モデル (`llama3.2`) は論文の `gpt-4-0314` と異なるため，LLM 駆動の再現目標は**定性的** (価格が (ベルトラン, カルテル) 区間内へ収束し CI ∈ [0.3, 0.8]) とする．解析ベンチマークは厳密である．
+再現性の本体はモデルではなく**キャッシュ**である．ウォームキャッシュは同一応答を再生するため，再実行は無料かつ安定する．各実行はモデル・provider・温度を runvault の `run.json` の `llm` ブロックに，呼び出し数と cache-hit 率を run スコープの指標として記録する．ローカル既定モデル (`llama3.2`) は論文の `gpt-4-0314` と異なるため，LLM 駆動の再現目標は**定性的** (価格が (ベルトラン, カルテル) 区間内へ収束し CI ∈ [0.3, 0.8]) とする．解析ベンチマークは厳密である．
 
 > 本プロジェクトは LLM レイヤを `socsim-llm` クレットに統一し，`reqwest` / `sha2` は使わない (HTTP とプロンプトキャッシュのハッシュは socsim-llm が所有する)．モデルは市場媒介 — 非空間・非ネットワーク — なので `socsim-core` + `socsim-engine` + `socsim-llm` のみに依存する (`socsim-grid` / `socsim-net` 不要)．
 
@@ -23,7 +23,7 @@ cargo build --release
 
 # === 解析ベンチマークのみ (LLM 不要・即時): 基本設定 → p^B=6, p^M=8 ===
 cargo run --release -- benchmark --a 14 --beta 0.0066667 --d 0.0033333 --c1 2 --c2 2
-# results/{ts}/benchmarks.json を書き出す
+# results/sabm/ 配下に runvault の run を書き出す
 
 # ローカル Ollama を起動しモデルを取得 (例):
 #   ollama pull llama3.2:latest
@@ -42,7 +42,7 @@ uv sync
 uv run sabm-tools visualize
 
 # 実行設定と LLM メタデータの確認
-uv run sabm-tools show-experiment-settings --results-dir results/latest
+uv run sabm-tools show-experiment-settings
 ```
 
 ### オフライン (LLM 不要) スモーク
@@ -70,7 +70,7 @@ uv run sabm-tools visualize-sweep
 
 ### 論文再現 (Fig.1/2/4)
 
-`reproduce` は会話なし baseline (Fig.1) と会話あり変種 (Fig.2) を一括実行し，観測した平均価格と collusion index をベルトラン(6)/カルテル(8) フレームと照合して `reproduce_summary.json` (観測 avg_price / collusion index と論文値 + PASS/off) を書き出す．Python `reproduce` ツールが headline 図を `<results>/figures/` に描画する．
+`reproduce` は会話なし baseline (Fig.1) と会話あり変種 (Fig.2) を一括実行し，観測した平均価格と collusion index をベルトラン(6)/カルテル(8) フレームと照合して 観測 avg_price / collusion index を run スコープの指標に，PASS/off の判定を `x.han2023.anchor` イベントに記録する．Python `reproduce` ツールが headline 図を `results/sabm/figures/<run_slug>/` に描画する．
 
 ```bash
 # 実 LLM で end-to-end (オフラインなら --mock; --quick で 80 ラウンドに短縮)

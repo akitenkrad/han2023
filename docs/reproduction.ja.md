@@ -54,7 +54,7 @@ cargo run --release -- reproduce --seed 42 --mock --quick   # オフライン構
 uv run sabm-tools reproduce                                 # fig1/fig2/fig4 描画 + PASS テーブル
 ```
 
-解析フレーム (`p_bertrand`・`p_cartel`)，シナリオごとの `observed_avg_price` / `observed_collusion_index` / `rounds_to_stable`，PASS/off アンカーを `reproduce_summary.json` に書き出す:
+解析フレーム (`{シナリオ}_p_bertrand_mean`・`{シナリオ}_p_cartel_mean`)，シナリオごとの価格軌跡と `rounds_to_stable` を `metrics.csv` に，PASS/off アンカーを `x.han2023.anchor` イベントに記録する:
 
 | アンカー | 目標 | 読み方 |
 | --- | --- | --- |

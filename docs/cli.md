@@ -13,7 +13,7 @@ Provider order is **Ollama first → OpenAI fallback** (owned by `socsim-llm`):
 
 ## `benchmark` — analytic prices only (no LLM, instant)
 
-Computes the Bertrand-equilibrium and cartel/monopoly prices and writes `benchmarks.json`. No live LLM is touched.
+Computes the Bertrand-equilibrium and cartel/monopoly prices. No live LLM is touched, and no RNG is used, so the run is recorded with `domain = analysis` and no `master_seed`. The all-firm means go to `metrics.csv` (`p_bertrand_mean` / `p_cartel_mean`); the per-firm values go to `x.han2023.benchmark` events, because a series with no time axis cannot be a metric row.
 
 ```bash
 cargo run --release -- benchmark --a 14 --beta 0.0066667 --d 0.0033333 --c1 2 --c2 2
@@ -41,7 +41,7 @@ Adds, on top of the market flags above: `--persona {active,aggressive,none}`, `-
 
 `--communication` is a **flag** (present = communication on; absent = the paper's no-communication basic case). When set, a `CommunicationPhase` runs before each pricing decision: every firm emits a short cheap-talk message that is injected into the next round's pricing prompts. Personas (`--persona`) and asymmetric marginal costs (`--c1` / `--c2`) shift the resulting prices — a higher-cost firm settles at a higher price.
 
-Writes `rounds.csv`, `metrics.csv`, `benchmarks.json`, `llm_meta.json`, `config.json` and refreshes `results/latest`.
+Writes a runvault run directory (`results/sabm/run_{timestamp}_{hash}/`): `metrics.csv` (per round `avg_price` / `collusion_index` / `total_profit`; without a step `p_bertrand_mean` / `p_cartel_mean` / `rounds_to_stable` and the LLM call counts), `events.jsonl` (one `observation` per firm and round carrying `price` / `quantity` / `profit`, a `terminal` per firm, and the per-firm `x.han2023.benchmark` rows) and `config.json`. There is no `latest` symlink — resolve the run with `runvault path --experiment sabm --latest --subcommand run --standalone`. With `--runs N` only the last trial is recorded in detail, as before; the earlier ones only warm the cache.
 
 ## `sweep` — d/β × firm-count sensitivity
 
@@ -51,7 +51,7 @@ cargo run --release -- sweep \
     --max-rounds 400 --runs 5 --seed 42
 ```
 
-Flags: `--d-beta-values`, `--firms-values`, `--a`, `--beta`, `--cost`, `--persona`, `--communication`, `--max-rounds`, `--runs`, `--seed`, `--temperature`, `--llm-seed`, `--cache-path`, `--output-dir`, `--mock`. Writes `sweep_summary.csv` + `sweep_config.json`.
+Flags: `--d-beta-values`, `--firms-values`, `--a`, `--beta`, `--cost`, `--persona`, `--communication`, `--max-rounds`, `--runs`, `--seed`, `--temperature`, `--llm-seed`, `--cache-path`, `--output-dir`, `--mock`. Writes a parent run (`subcommand=sweep`, the grid definition, no `master_seed` — a grid is not one simulation) plus one child per condition (`subcommand=sweep-point`, `parameters` carrying `firms` / `d_beta`). Each child's `events.jsonl` holds one `terminal` row per trial — the columns of the old `sweep_summary.csv` — and its `metrics.csv` holds the condition's aggregate at `scope=run`. Per-trial values cannot live in `metrics.csv`: its primary key is `(run_uid, name, step, step_unit, scope)`, so the trials of one condition would collide.
 
 ## `reproduce` — paper Fig.1/2/4 batch
 
@@ -60,7 +60,7 @@ cargo run --release -- reproduce --seed 42            # live LLM
 cargo run --release -- reproduce --seed 42 --mock --quick   # offline, 80 rounds
 ```
 
-Runs the no-communication baseline (Fig.1) and the communication variant (Fig.2), compares the observed average price and collusion index against the Bertrand(6)/cartel(8) frame, and writes a `reproduce_summary.json` (per-scenario `observed_avg_price` / `observed_collusion_index`, the analytic frame, and PASS/off anchors) plus per-scenario `rounds.csv` / `metrics.csv` / `benchmarks.json` under a `<ts>_reproduce/` directory. Flags: the market flags above, `--persona`, `--max-rounds`, `--seed`, `--temperature`, `--llm-seed`, `--cache-path`, `--output-dir`, `--mock`, `--quick`. Render the figures with `uv run sabm-tools reproduce`.
+Runs the no-communication baseline (Fig.1) and the communication variant (Fig.2), compares the observed average price and collusion index against the Bertrand(6)/cartel(8) frame, and writes one run (`subcommand=reproduce`). Both scenarios share it, so the scenario name is folded into the metric names (`no_communication_avg_price` …) and into the `unit_id`s (`communication-firm-0` …) — `(step, scope, name)` is the primary key. The anchors' observed values are `anchor_{id}` metrics with `checks_passed` / `checks_total`; the bands and the PASS/off verdicts are `x.han2023.anchor` events, since a direction and a category are not numbers. The bands mix what the paper reports (the Bertrand 6 / cartel 8 frame) with qualitative anchors this replication chose, so none of them are written to `reference.csv`. Flags: the market flags above, `--persona`, `--max-rounds`, `--seed`, `--temperature`, `--llm-seed`, `--cache-path`, `--output-dir`, `--mock`, `--quick`. Render the figures with `uv run sabm-tools reproduce`.
 
 ## Offline smoke (no live LLM)
 

@@ -4,26 +4,34 @@
 //!               (LLM 不要・即時)．基本設定で p^B=6, p^M=8 を厳密に出力する．
 //! `run`       : 単一設定で LLM 駆動の繰り返し価格ゲームを実行し，暗黙の共謀
 //!               (価格が (Bertrand, cartel) 区間へ収束) を観測する．
-//! `sweep`     : 差別化度 d/β × 企業数 を走査し，最終 collusion index を
-//!               `sweep_summary.csv` に集計する．
-//! `reproduce` : 論文 Fig.1/2/4 一括再現 (Phase 3; 現状はスタブで案内のみ)．
+//! `sweep`     : 差別化度 d/β × 企業数 を走査し，条件 1 点ごとに子 run を起こして
+//!               `runs` 本の試行を回す．
+//! `reproduce` : 論文 Fig.1/2/4 (会話なし / 会話あり) を一括再現し，観測 vs 論文の
+//!               PASS/off を run スコープの指標とイベントに記録する．
+//!
+//! 出力の置き場と同一性は runvault が持つ．タイムスタンプ付きディレクトリも
+//! `latest` シンボリックリンクもこちらでは作らず，`Run::start` が決めた run
+//! ディレクトリへ書く．
+//!
+//! LLM クライアントは記録を始める **前** に組む．`run.json` の `llm` ブロックは
+//! `Run::start` の時点で確定するので，モデル名と endpoint を知っている側 (=
+//! クライアントを組んだ側) が先に立たないと，llm ブロックを埋めないまま記録できて
+//! しまう．
 
 use std::fs;
 use std::path::Path;
 
 use clap::{Parser, Subcommand};
-use socsim_results::{ensure_dir, refresh_latest_symlink, timestamp, write_csv, write_json};
+use runvault::{Lineage, Run, RunOptions};
+use serde::Serialize;
 
 use sabm_simulation::config::{derive_run_seed, Config, LlmSettings};
-use sabm_simulation::llm::wrap_client;
-use sabm_simulation::simulation::{
-    compute_benchmarks, ensure_output_dir, run, run_with_client, save_benchmarks, save_llm_meta,
-    save_metrics, save_rounds, SimulationResult,
-};
+use sabm_simulation::llm::{build_live_client, wrap_client, SabmClient};
+use sabm_simulation::record::{self, RunParameters, DOMAIN, DOMAIN_ANALYSIS, EXPERIMENT, REPO_ID};
+use sabm_simulation::simulation::{compute_benchmarks, run_with_client, SimulationResult};
 use sabm_simulation::world::parse_persona;
 use socsim_llm::mock::ScriptedClient;
 use socsim_llm::PromptCache;
-
 // ---------------------------------------------------------------------------
 // CLI 定義
 // ---------------------------------------------------------------------------
@@ -272,40 +280,6 @@ struct ReproduceArgs {
 // 補助
 // ---------------------------------------------------------------------------
 
-/// `sweep_summary.csv` の 1 行 (条件ごとの最終 collusion index)．
-#[derive(serde::Serialize)]
-struct SweepRow {
-    firms: usize,
-    d_beta: f64,
-    run: usize,
-    seed: u64,
-    final_round: usize,
-    final_avg_price: f64,
-    final_collusion_index: f64,
-    p_bertrand_mean: f64,
-    p_cartel_mean: f64,
-    rounds_to_stable: i64,
-    cache_hit_rate: f64,
-}
-
-/// `sweep_config.json` の構造体．
-#[derive(serde::Serialize)]
-struct SweepConfigJson {
-    command: &'static str,
-    d_beta_values: Vec<f64>,
-    firms_values: Vec<usize>,
-    a: f64,
-    beta: f64,
-    cost: f64,
-    persona: String,
-    communication: bool,
-    max_rounds: usize,
-    runs: usize,
-    seed: u64,
-    llm_temperature: f32,
-    llm_seed: u64,
-}
-
 /// カンマ区切り文字列を trim 済みの非空リストへ．
 fn split_csv(s: &str) -> Vec<String> {
     s.split(',')
@@ -379,13 +353,17 @@ fn prompt_midpoint(prompt: &str, fallback: f64) -> f64 {
     }
 }
 
-/// 1 設定を実行する (`--mock` ならライブ LLM の代わりに scripted mock を使う)．
+/// LLM クライアントを組み，モデル名と endpoint を先に取り出す．
+///
+/// `Run::start` は開始時点で `run.json` を書くので，`llm` ブロックを埋めるには記録を
+/// 始める前にクライアントを組んでおく必要がある．mock は in-memory キャッシュしか
+/// 持たないので，`save()` を呼ばないよう `cache_path` を落とした設定も一緒に返す．
 ///
 /// mock ポリシーは «直近自社価格を中点 (Bertrand と cartel の中間) へ 50% 寄せる»
 /// 暗黙の共謀風挙動で，ネットワーク遮断サンドボックスでも価格軌跡を生成できる
 /// (ライブ LLM 呼び出し 0)．
-fn run_one(cfg: &Config, mock: bool) -> Result<SimulationResult, String> {
-    if mock {
+fn build_client(cfg: &Config, mock: bool) -> (Config, SabmClient, String, String) {
+    let (cfg, client) = if mock {
         let bench = compute_benchmarks(cfg);
         let target = 0.5 * (mean(&bench.p_bertrand) + mean(&bench.p_cartel));
         let backend = ScriptedClient::new("mock-llama3.2", move |prompt: &str| {
@@ -401,19 +379,101 @@ fn run_one(cfg: &Config, mock: bool) -> Result<SimulationResult, String> {
             let next = last + 0.5 * (firm_target - last);
             format!("{{\"price\": {next:.4}}}")
         });
-        let client = wrap_client(backend, PromptCache::in_memory());
-        // mock は in-memory cache なので保存先を持たない (save をスキップさせる)．
-        let mock_cfg = Config {
-            llm: LlmSettings {
-                cache_path: None,
-                ..cfg.llm.clone()
-            },
-            ..cfg.clone()
-        };
-        run_with_client(&mock_cfg, client)
+        let mut mock_cfg = cfg.clone();
+        mock_cfg.llm.cache_path = None;
+        (mock_cfg, wrap_client(backend, PromptCache::in_memory()))
     } else {
-        run(cfg)
+        let client = build_live_client(&cfg.llm)
+            .unwrap_or_else(|e| panic!("LLM クライアント構築に失敗: {e}"));
+        (cfg.clone(), client)
+    };
+    let model = client.inner().model().to_string();
+    let endpoint = client.inner().endpoint().to_string();
+    (cfg, client, model, endpoint)
+}
+
+/// キャッシュファイルの親ディレクトリを用意する．
+fn ensure_cache_dir(cache_path: &str) {
+    if let Some(parent) = Path::new(cache_path).parent() {
+        let _ = fs::create_dir_all(parent);
     }
+}
+
+/// `benchmark` サブコマンドの実験条件．
+///
+/// 解析計算に必要な需要・コストのパラメータだけを持つ．シードも LLM も要らない．
+#[derive(Serialize)]
+struct BenchmarkParameters {
+    n_firms: usize,
+    a: f64,
+    beta: f64,
+    d: f64,
+    d_over_beta: f64,
+    alpha: f64,
+    b: f64,
+    c1: f64,
+    c2: f64,
+}
+
+/// スイープ親 run の実験条件 (グリッド定義そのもの)．
+#[derive(Serialize)]
+struct SweepParameters {
+    d_beta_values: Vec<f64>,
+    firms_values: Vec<usize>,
+    a: f64,
+    beta: f64,
+    cost: f64,
+    persona: String,
+    communication: bool,
+    max_rounds: usize,
+    runs: usize,
+    seed: u64,
+    llm_temperature: f32,
+    llm_seed: u64,
+    mock: bool,
+}
+
+/// スイープの子 run (firms × d/β の 1 点) の実験条件．
+///
+/// `run` の条件に `runs` が付いた形で，`run` とは別のサブコマンド名を持つ．同じ
+/// `run` を名乗らせると，«1 本のシミュレーション» と «同一条件の `runs` 本» という
+/// 中身の違う 2 つが 1 つの名前に同居し，`runvault path --subcommand run` がどちらを
+/// 返すか分からなくなる．
+#[derive(Serialize)]
+struct SweepPointParameters {
+    firms: usize,
+    d_beta: f64,
+    a: f64,
+    beta: f64,
+    cost: f64,
+    persona: String,
+    communication: bool,
+    max_rounds: usize,
+    runs: usize,
+    seed: u64,
+    llm_temperature: f32,
+    llm_seed: u64,
+    mock: bool,
+}
+
+/// `reproduce` の実験条件．
+#[derive(Serialize)]
+struct ReproduceParameters {
+    n_firms: usize,
+    a: f64,
+    beta: f64,
+    d: f64,
+    d_over_beta: f64,
+    c1: f64,
+    c2: f64,
+    persona: String,
+    scenarios: Vec<&'static str>,
+    max_rounds: usize,
+    seed: u64,
+    llm_temperature: f32,
+    llm_seed: u64,
+    mock: bool,
+    quick: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -433,15 +493,34 @@ fn cmd_benchmark(args: BenchmarkArgs) {
     let bench = compute_benchmarks(&cfg);
     let dp = cfg.demand_params();
 
-    let timestamp = timestamp();
-    let output_dir = format!("{}/{}", args.output_dir, timestamp);
-    ensure_output_dir(&output_dir);
-    save_benchmarks(&bench, &output_dir);
-    // config.json も書く (show-experiment-settings で読めるように; pretty-JSON は
-    // socsim_results::write_json に委譲, バイト等価)．
-    let path = format!("{}/config.json", output_dir);
-    write_json(&cfg.to_run_config_json(), &path).expect("config.json の書き込みに失敗");
-    let _ = refresh_latest_symlink(&args.output_dir, &timestamp);
+    let parameters = BenchmarkParameters {
+        n_firms: cfg.n_firms,
+        a: cfg.a,
+        beta: cfg.beta,
+        d: cfg.d,
+        d_over_beta: dp.d_over_beta(),
+        alpha: dp.alpha,
+        b: dp.b,
+        c1: cfg.c1,
+        c2: cfg.c2,
+    };
+
+    // domain = analysis．需要パラメータだけから決まる純粋な数値計算で RNG を使わない
+    // ので，master_seed は持たない (simulation を名乗ると必須になり，存在しないシードを
+    // 書くことになる)．
+    let mut rv = Run::start(
+        RunOptions::new(EXPERIMENT, "benchmark")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN_ANALYSIS)
+            .results_root(&args.output_dir)
+            .parameters(&parameters)
+            .expect("runvault: parameters の組み立てに失敗")
+            .replication(record::replication()),
+    )
+    .expect("runvault: benchmark run の開始に失敗");
+
+    record::log_benchmark_means(&mut rv, &bench);
+    record::log_benchmarks(&mut rv, None, &bench);
 
     println!("=== Han, Wu & Xiao (2023) SABM 解析ベンチマーク ===");
     println!(
@@ -471,7 +550,11 @@ fn cmd_benchmark(args: BenchmarkArgs) {
         mean(&bench.p_cartel)
     );
     println!("-------------------------------------------------");
-    println!("benchmarks → {}/benchmarks.json", output_dir);
+
+    let dir = rv.finish().expect("runvault: benchmark run の完了に失敗");
+    println!("企業ごとの値 → {}/events.jsonl", dir.display());
+    println!("全社平均     → {}/metrics.csv", dir.display());
+    println!("設定         → {}/config.json", dir.display());
 }
 
 // ---------------------------------------------------------------------------
@@ -481,13 +564,54 @@ fn cmd_benchmark(args: BenchmarkArgs) {
 fn cmd_run(args: RunArgs) {
     let persona = parse_persona(&args.persona).unwrap_or_else(|e| panic!("{}", e));
 
-    let timestamp = timestamp();
-    let output_dir = format!("{}/{}", args.output_dir, timestamp);
-
-    if let Some(parent) = Path::new(&args.cache_path).parent() {
-        let _ = fs::create_dir_all(parent);
+    if !args.mock {
+        ensure_cache_dir(&args.cache_path);
     }
-    ensure_output_dir(&output_dir);
+
+    let base_seed = args.seed.unwrap_or(42);
+    let runs = args.runs.max(1);
+
+    // 代表 (最後の) 試行の条件でクライアントを組み，モデル名を先に取る．
+    let base_cfg = Config {
+        n_firms: args.market.firms,
+        a: args.market.a,
+        beta: args.market.beta,
+        d: args.market.effective_d(),
+        c1: args.market.c1,
+        c2: args.market.c2,
+        persona,
+        communication: args.communication,
+        max_rounds: args.max_rounds,
+        reflection_period: args.reflection_period,
+        memory_window: args.memory_window,
+        seed: Some(base_seed),
+        llm: LlmSettings {
+            temperature: args.temperature,
+            seed: args.llm_seed,
+            cache_path: Some(args.cache_path.clone()),
+        },
+        ..Config::default()
+    };
+    let (_, probe, model, endpoint) = build_client(&base_cfg, args.mock);
+    drop(probe);
+
+    // 記録する `seed` は base seed である．試行ごとの派生シードは terminal 行の
+    // `trial_seed` が持つ (`--runs` が 1 本でも derive_run_seed(base, 0) を通る)．
+    let parameters = RunParameters::new(&base_cfg, runs, base_seed, args.mock);
+
+    let mut rv = Run::start(
+        RunOptions::new(EXPERIMENT, "run")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&parameters)
+            .expect("runvault: parameters の組み立てに失敗")
+            .seed_pointers(["/seed"])
+            .master_seed(base_seed)
+            .llm(record::llm_block(&model, &endpoint, args.temperature))
+            .replication(record::replication()),
+    )
+    .expect("runvault: run の開始に失敗");
 
     println!("=== Han, Wu & Xiao (2023) SABM 暗黙の共謀 再現実験 ===");
     println!(
@@ -496,7 +620,7 @@ fn cmd_run(args: RunArgs) {
         persona.label(),
         args.communication,
         args.max_rounds,
-        args.runs,
+        runs,
     );
     println!(
         "demand: a={} β={:.6} d={:.6} (d/β={:.3}) | c1={} c2={}",
@@ -508,87 +632,74 @@ fn cmd_run(args: RunArgs) {
         args.market.c2,
     );
     println!(
-        "LLM: temp={} llm_seed={} cache={} | seed: {:?}",
-        args.temperature, args.llm_seed, args.cache_path, args.seed
+        "LLM: model={} temp={} llm_seed={} cache={} | seed (base): {}",
+        model,
+        args.temperature,
+        args.llm_seed,
+        if args.mock {
+            "(in-memory)"
+        } else {
+            args.cache_path.as_str()
+        },
+        base_seed,
     );
-    println!("出力先: {}", output_dir);
+    println!("出力先: {}", rv.dir().display());
     println!("-------------------------------------------------");
 
-    let base_seed = args.seed.unwrap_or(42);
-    let mut last_result: Option<SimulationResult> = None;
-    let mut last_cfg: Option<Config> = None;
+    let mut last: Option<(SimulationResult, u64)> = None;
 
-    for run_idx in 0..args.runs.max(1) {
+    for run_idx in 0..runs {
         let seed = derive_run_seed(base_seed, run_idx);
         let cfg = Config {
-            n_firms: args.market.firms,
-            a: args.market.a,
-            beta: args.market.beta,
-            d: args.market.effective_d(),
-            c1: args.market.c1,
-            c2: args.market.c2,
-            persona,
-            communication: args.communication,
-            max_rounds: args.max_rounds,
-            reflection_period: args.reflection_period,
-            memory_window: args.memory_window,
             seed: Some(seed),
-            llm: LlmSettings {
-                temperature: args.temperature,
-                seed: args.llm_seed,
-                cache_path: Some(args.cache_path.clone()),
-            },
-            output_dir: output_dir.clone(),
-            ..Config::default()
+            ..base_cfg.clone()
         };
+        let (cfg, client, _, _) = build_client(&cfg, args.mock);
+        let result = run_with_client(&cfg, client).unwrap_or_else(|e| panic!("実行に失敗: {}", e));
 
-        let result = run_one(&cfg, args.mock).unwrap_or_else(|e| panic!("実行に失敗: {}", e));
-
-        // 最後の試行の詳細を保存する (代表 run)．
-        if run_idx + 1 == args.runs.max(1) {
-            save_rounds(&result.rounds, &output_dir);
-            save_metrics(&result.metrics, &output_dir);
-            save_benchmarks(&result.benchmarks, &output_dir);
-            save_llm_meta(&result, &cfg, &output_dir);
-            let path = format!("{}/config.json", output_dir);
-            write_json(&cfg.to_run_config_json(), &path).expect("config.json の書き込みに失敗");
-            last_result = Some(result);
-            last_cfg = Some(cfg);
+        // 詳細を残すのは最後の試行 (代表 run) だけ．移行前も同じで，先行する試行は
+        // キャッシュを温めるだけだった．
+        if run_idx + 1 == runs {
+            last = Some((result, seed));
         }
     }
 
-    let _ = refresh_latest_symlink(&args.output_dir, &timestamp);
-
-    if let (Some(result), Some(_cfg)) = (&last_result, &last_cfg) {
-        let stable = result
-            .rounds_to_stable()
-            .map(|r| r.to_string())
-            .unwrap_or_else(|| "未達 (no stable convergence within max_rounds)".to_string());
-        println!(
-            "最終ラウンド: {} | 平均価格: {:.3} | CI: {:.3} (0=Bertrand, 1=cartel)",
-            result.final_round,
-            result.final_avg_price(),
-            result.final_collusion_index(),
-        );
-        println!(
-            "ベンチマーク: p_bertrand={:.3} p_cartel={:.3} | 安定到達ラウンド: {}",
-            mean(&result.benchmarks.p_bertrand),
-            mean(&result.benchmarks.p_cartel),
-            stable,
-        );
-        println!(
-            "LLM 呼び出し: {} 回 | cache-hit: {} ({:.1}%) | model: {}",
-            result.metadata.total(),
-            result.metadata.cache_hits(),
-            result.metadata.cache_hit_rate() * 100.0,
-            result.llm_model,
-        );
+    let (result, seed) = last.expect("試行が 1 本もありません");
+    for m in &result.metrics {
+        record::log_round(&mut rv, None, m);
     }
-    println!("ラウンド   → {}/rounds.csv", output_dir);
-    println!("メトリクス → {}/metrics.csv", output_dir);
-    println!("ベンチマーク → {}/benchmarks.json", output_dir);
-    println!("LLM メタ   → {}/llm_meta.json", output_dir);
-    println!("設定       → {}/config.json", output_dir);
+    record::log_run_scalars(&mut rv, None, &result);
+    record::log_benchmarks(&mut rv, None, &result.benchmarks);
+    record::log_firms(&mut rv, None, seed, base_cfg.max_rounds, &result);
+
+    let stable = result
+        .rounds_to_stable()
+        .map(|r| r.to_string())
+        .unwrap_or_else(|| "未達 (no stable convergence within max_rounds)".to_string());
+    println!(
+        "最終ラウンド: {} | 平均価格: {:.3} | CI: {:.3} (0=Bertrand, 1=cartel)",
+        result.final_round,
+        result.final_avg_price(),
+        result.final_collusion_index(),
+    );
+    println!(
+        "ベンチマーク: p_bertrand={:.3} p_cartel={:.3} | 安定到達ラウンド: {}",
+        mean(&result.benchmarks.p_bertrand),
+        mean(&result.benchmarks.p_cartel),
+        stable,
+    );
+    println!(
+        "LLM 呼び出し: {} 回 | cache-hit: {} ({:.1}%) | model: {}",
+        result.metadata.total(),
+        result.metadata.cache_hits(),
+        result.metadata.cache_hit_rate() * 100.0,
+        result.llm_model,
+    );
+
+    let dir = rv.finish().expect("runvault: run の完了に失敗");
+    println!("ラウンド指標   → {}/metrics.csv", dir.display());
+    println!("企業ごとの軌跡 → {}/events.jsonl", dir.display());
+    println!("設定           → {}/config.json", dir.display());
 }
 
 // ---------------------------------------------------------------------------
@@ -612,14 +723,73 @@ fn cmd_sweep(args: SweepArgs) {
         })
         .collect();
 
-    let timestamp = timestamp();
-    let sweep_dir = format!("{}/{}_sweep", args.output_dir, timestamp);
-    ensure_dir(&sweep_dir).expect("sweep ディレクトリの作成に失敗");
-    if let Some(parent) = Path::new(&args.cache_path).parent() {
-        let _ = fs::create_dir_all(parent);
+    if !args.mock {
+        ensure_cache_dir(&args.cache_path);
     }
 
     let n_total = d_beta_values.len() * firms_values.len() * args.runs;
+
+    // llm ブロックのためにモデル名を先に取る (親子で同じ値を共有する)．
+    let probe_cfg = Config {
+        n_firms: firms_values[0],
+        a: args.a,
+        beta: args.beta,
+        d: d_beta_values[0] * args.beta,
+        c1: args.cost,
+        c2: args.cost,
+        persona,
+        communication: args.communication,
+        max_rounds: args.max_rounds,
+        seed: Some(args.seed),
+        llm: LlmSettings {
+            temperature: args.temperature,
+            seed: args.llm_seed,
+            cache_path: Some(args.cache_path.clone()),
+        },
+        ..Config::default()
+    };
+    let (_, probe, model, endpoint) = build_client(&probe_cfg, args.mock);
+    drop(probe);
+    let llm = || record::llm_block(&model, &endpoint, args.temperature);
+
+    let sweep_parameters = SweepParameters {
+        d_beta_values: d_beta_values.clone(),
+        firms_values: firms_values.clone(),
+        a: args.a,
+        beta: args.beta,
+        cost: args.cost,
+        persona: persona.label().to_string(),
+        communication: args.communication,
+        max_rounds: args.max_rounds,
+        runs: args.runs,
+        seed: args.seed,
+        llm_temperature: args.temperature,
+        llm_seed: args.llm_seed,
+        mock: args.mock,
+    };
+
+    // 親 run: グリッド定義そのものを parameters に持つ．個別条件の指標は書かない．
+    // 親は 1 本のシミュレーションではないので master_seed を名乗らず，base seed は
+    // /parameters.seed と seed_pointers 経由で execution_hash に残る．
+    let parent = Run::start(
+        RunOptions::new(EXPERIMENT, "sweep")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&sweep_parameters)
+            .expect("runvault: sweep の parameters の組み立てに失敗")
+            .seed_pointers(["/seed"])
+            .sweep_parent()
+            .llm(llm())
+            .replication(record::replication()),
+    )
+    .expect("runvault: sweep 親 run の開始に失敗");
+
+    let sweep_id = parent
+        .sweep_id()
+        .expect("runvault: sweep 親に sweep_id がありません")
+        .to_string();
+    let parent_run_uid = parent.run_uid().to_string();
 
     println!("=== Han, Wu & Xiao (2023) SABM パラメータスイープ ===");
     println!(
@@ -630,15 +800,60 @@ fn cmd_sweep(args: SweepArgs) {
         args.runs,
         n_total,
     );
-    println!("出力先: {}", sweep_dir);
+    println!("シード (base): {} | model: {}", args.seed, model);
+    println!("出力先: {}", parent.dir().display());
     println!("-----------------------------------------------------------");
 
-    let mut summary_rows: Vec<SweepRow> = Vec::with_capacity(n_total);
     let mut done = 0usize;
+    // d/β ごとの平均 collusion index (表示のためだけに持つ)．
+    let mut per_d_beta: Vec<(f64, Vec<f64>)> =
+        d_beta_values.iter().map(|&d| (d, Vec::new())).collect();
 
     for &firms in &firms_values {
         for &d_beta in &d_beta_values {
+            let params = SweepPointParameters {
+                firms,
+                d_beta,
+                a: args.a,
+                beta: args.beta,
+                cost: args.cost,
+                persona: persona.label().to_string(),
+                communication: args.communication,
+                max_rounds: args.max_rounds,
+                runs: args.runs,
+                seed: args.seed,
+                llm_temperature: args.temperature,
+                llm_seed: args.llm_seed,
+                mock: args.mock,
+            };
+
+            // 子は «その条件の試行群» そのもの．master_seed は親と同じ base で，
+            // 条件が違えば config_hash が違うので run としては別物になる．
+            // 同じ条件の繰り返しは無いので replicate_index は 0．
+            let mut child = Run::start(
+                RunOptions::new(EXPERIMENT, "sweep-point")
+                    .repo_id(REPO_ID)
+                    .domain(DOMAIN)
+                    .results_root(&args.output_dir)
+                    .parameters(&params)
+                    .expect("runvault: 子 run の parameters の組み立てに失敗")
+                    .seed_pointers(["/seed"])
+                    .master_seed(args.seed)
+                    .replicate_index(0)
+                    .llm(llm())
+                    .lineage(Lineage {
+                        sweep_id: Some(sweep_id.clone()),
+                        parent_run_uid: Some(parent_run_uid.clone()),
+                        ..Default::default()
+                    })
+                    .replication(record::replication()),
+            )
+            .expect("runvault: 子 run の開始に失敗");
+
+            let mut trials: Vec<record::TrialOutcome> = Vec::with_capacity(args.runs);
             for run_idx in 0..args.runs {
+                // 各条件に独立なシードを派生 (explicit identity)．移行前と同じ引数・
+                // 同じ順序で derive_seed を呼ぶ．
                 let seed = socsim_core::derive_seed(
                     args.seed,
                     &[firms as u64, (d_beta * 1000.0) as u64, run_idx as u64],
@@ -659,27 +874,33 @@ fn cmd_sweep(args: SweepArgs) {
                         seed: args.llm_seed,
                         cache_path: Some(args.cache_path.clone()),
                     },
-                    output_dir: sweep_dir.clone(),
                     ..Config::default()
                 };
 
+                let (cfg, client, _, _) = build_client(&cfg, args.mock);
                 let result =
-                    run_one(&cfg, args.mock).unwrap_or_else(|e| panic!("実行に失敗: {}", e));
-                summary_rows.push(SweepRow {
-                    firms,
-                    d_beta,
-                    run: run_idx,
+                    run_with_client(&cfg, client).unwrap_or_else(|e| panic!("実行に失敗: {}", e));
+
+                let outcome = record::log_trial(
+                    &mut child,
+                    &format!("trial-{run_idx}"),
                     seed,
-                    final_round: result.final_round,
-                    final_avg_price: result.final_avg_price(),
-                    final_collusion_index: result.final_collusion_index(),
-                    p_bertrand_mean: mean(&result.benchmarks.p_bertrand),
-                    p_cartel_mean: mean(&result.benchmarks.p_cartel),
-                    rounds_to_stable: result.rounds_to_stable().map(|r| r as i64).unwrap_or(-1),
-                    cache_hit_rate: result.metadata.cache_hit_rate(),
-                });
+                    args.max_rounds,
+                    &result,
+                );
+                if let Some(slot) = per_d_beta
+                    .iter_mut()
+                    .find(|(d, _)| (*d - d_beta).abs() < 1e-9)
+                {
+                    slot.1.push(outcome.final_collusion_index);
+                }
+                trials.push(outcome);
+
                 done += 1;
             }
+            record::log_condition_summary(&mut child, &trials);
+            child.finish().expect("runvault: 子 run の完了に失敗");
+
             println!(
                 "[{}/{}] firms={} d/β={:.3} 完了 ({} 試行)",
                 done, n_total, firms, d_beta, args.runs,
@@ -687,124 +908,127 @@ fn cmd_sweep(args: SweepArgs) {
         }
     }
 
-    // sweep_summary.csv (各行を serialize; socsim_results::write_csv に委譲, バイト等価)．
-    {
-        let path = format!("{}/sweep_summary.csv", sweep_dir);
-        write_csv(&summary_rows, &path).expect("sweep_summary.csv の書き込みに失敗");
-    }
-
-    // sweep_config.json
-    {
-        let config_json = SweepConfigJson {
-            command: "sweep",
-            d_beta_values: d_beta_values.clone(),
-            firms_values: firms_values.clone(),
-            a: args.a,
-            beta: args.beta,
-            cost: args.cost,
-            persona: persona.label().to_string(),
-            communication: args.communication,
-            max_rounds: args.max_rounds,
-            runs: args.runs,
-            seed: args.seed,
-            llm_temperature: args.temperature,
-            llm_seed: args.llm_seed,
-        };
-        let path = format!("{}/sweep_config.json", sweep_dir);
-        write_json(&config_json, &path).expect("sweep_config.json の書き込みに失敗");
-    }
-
-    let _ = refresh_latest_symlink(&args.output_dir, &format!("{}_sweep", timestamp));
+    let parent_dir = parent
+        .finish()
+        .expect("runvault: sweep 親 run の完了に失敗");
 
     println!("===========================================================");
     println!("スイープ完了: {} 実行", n_total);
     println!("-----------------------------------------------------------");
     println!("d/β 別の平均 collusion index (差別化度↑ → 共謀しにくい傾向):");
-    for &d_beta in &d_beta_values {
-        let rows: Vec<&SweepRow> = summary_rows
-            .iter()
-            .filter(|r| (r.d_beta - d_beta).abs() < 1e-9)
-            .collect();
-        if rows.is_empty() {
+    for (d_beta, cis) in &per_d_beta {
+        if cis.is_empty() {
             continue;
         }
-        let avg_ci = mean(
-            &rows
-                .iter()
-                .map(|r| r.final_collusion_index)
-                .collect::<Vec<_>>(),
-        );
-        println!("  d/β={d_beta:<5.3} → CI = {avg_ci:.3}");
+        println!("  d/β={d_beta:<5.3} → CI = {:.3}", mean(cis));
     }
     println!("-----------------------------------------------------------");
-    println!("サマリ → {}/sweep_summary.csv", sweep_dir);
-    println!("設定   → {}/sweep_config.json", sweep_dir);
+    println!("親 run → {}", parent_dir.display());
+    println!("条件ごとの子 run は subcommand=sweep-point (試行は events.jsonl)．");
 }
 
 // ---------------------------------------------------------------------------
 // reproduce (論文 Fig.1/2/4 一括再現)
 // ---------------------------------------------------------------------------
 
-/// `reproduce_summary.json` の 1 シナリオ行．
-#[derive(serde::Serialize)]
+/// 1 シナリオ (会話なし / 会話あり) の観測値．
 struct ReproduceScenario {
-    /// シナリオ名 (no_communication / communication)．
+    /// シナリオ名 (指標名の接頭辞になる slug)．
     name: &'static str,
-    /// 会話の有無．
-    communication: bool,
     /// 観測した最終ラウンドの全社平均価格．
     observed_avg_price: f64,
     /// 観測した最終ラウンドの collusion index．
     observed_collusion_index: f64,
-    /// 安定 (共謀) 到達ラウンド (なければ -1)．
-    rounds_to_stable: i64,
-    /// 実行ラウンド数．
+    /// 安定 (共謀) 到達ラウンド (未達なら `None`)．
+    rounds_to_stable: Option<usize>,
+    /// socsim エンジンのクロックの最終値．
     final_round: usize,
     /// 解析 Bertrand 価格 (全社平均)．
     p_bertrand: f64,
     /// 解析 cartel 価格 (全社平均)．
     p_cartel: f64,
-    /// この結果を保存したサブディレクトリ (Python の図生成入力)．
-    results_subdir: String,
 }
 
-/// `reproduce_summary.json` のアンカー判定行．
-#[derive(serde::Serialize)]
+/// 観測値と論文の値を突き合わせた 1 アンカー．
 struct ReproduceAnchor {
-    name: String,
+    /// 指標名になる slug．
+    id: String,
+    /// 人間向けの説明 (どの量を見ているか)．
+    label: String,
+    /// 論文側の値・主張．
     paper_value: String,
     observed: f64,
     target_lo: f64,
-    target_hi: f64,
+    /// 上限．`None` は «上限なし»．
+    target_hi: Option<f64>,
     pass: bool,
-}
-
-/// `reproduce_summary.json` のルート．
-#[derive(serde::Serialize)]
-struct ReproduceSummary {
-    command: &'static str,
-    paper: &'static str,
-    /// 解析アンカー (Bertrand=6, cartel=8; 基本設定)．
-    p_bertrand: f64,
-    p_cartel: f64,
-    mock: bool,
-    quick: bool,
-    scenarios: Vec<ReproduceScenario>,
-    anchors: Vec<ReproduceAnchor>,
-    n_pass: usize,
-    n_anchors: usize,
 }
 
 fn cmd_reproduce(args: ReproduceArgs) {
     let persona = parse_persona(&args.persona).unwrap_or_else(|e| panic!("{}", e));
     let max_rounds = if args.quick { 80 } else { args.max_rounds };
 
-    let ts = timestamp();
-    let out_dir = format!("{}/{}_reproduce", args.output_dir, ts);
-    ensure_output_dir(&out_dir);
-    if let Some(parent) = Path::new(&args.cache_path).parent() {
-        let _ = fs::create_dir_all(parent);
+    if !args.mock {
+        ensure_cache_dir(&args.cache_path);
     }
+
+    // 2 シナリオ: 会話なし (Fig.1) と 会話あり (Fig.2)．Fig.4 = 両者の収束水準/速度の差．
+    let scenarios_spec: [(&'static str, bool); 2] =
+        [("no_communication", false), ("communication", true)];
+
+    let base_cfg = Config {
+        n_firms: args.market.firms,
+        a: args.market.a,
+        beta: args.market.beta,
+        d: args.market.effective_d(),
+        c1: args.market.c1,
+        c2: args.market.c2,
+        persona,
+        communication: false,
+        max_rounds,
+        seed: Some(args.seed),
+        llm: LlmSettings {
+            temperature: args.temperature,
+            seed: args.llm_seed,
+            cache_path: Some(args.cache_path.clone()),
+        },
+        ..Config::default()
+    };
+    let (_, probe, model, endpoint) = build_client(&base_cfg, args.mock);
+    drop(probe);
+
+    let dp = base_cfg.demand_params();
+    let parameters = ReproduceParameters {
+        n_firms: base_cfg.n_firms,
+        a: base_cfg.a,
+        beta: base_cfg.beta,
+        d: base_cfg.d,
+        d_over_beta: dp.d_over_beta(),
+        c1: base_cfg.c1,
+        c2: base_cfg.c2,
+        persona: persona.label().to_string(),
+        scenarios: scenarios_spec.iter().map(|(n, _)| *n).collect(),
+        max_rounds,
+        seed: args.seed,
+        llm_temperature: args.temperature,
+        llm_seed: args.llm_seed,
+        mock: args.mock,
+        quick: args.quick,
+    };
+
+    let mut rv = Run::start(
+        RunOptions::new(EXPERIMENT, "reproduce")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&parameters)
+            .expect("runvault: parameters の組み立てに失敗")
+            .seed_pointers(["/seed"])
+            .master_seed(args.seed)
+            .llm(record::llm_block(&model, &endpoint, args.temperature))
+            .replication(record::replication()),
+    )
+    .expect("runvault: reproduce run の開始に失敗");
 
     println!("=== Han, Wu & Xiao (2023) SABM 論文 Fig.1/2/4 一括再現 ===");
     println!(
@@ -814,58 +1038,38 @@ fn cmd_reproduce(args: ReproduceArgs) {
         args.mock,
         args.quick,
     );
-    println!("出力先: {}", out_dir);
+    println!("出力先: {}", rv.dir().display());
     println!("-------------------------------------------------");
-
-    // 2 シナリオ: 会話なし (Fig.1) と 会話あり (Fig.2)．Fig.4 = 両者の収束水準/速度の差．
-    let scenarios_spec: [(&'static str, bool); 2] =
-        [("no_communication", false), ("communication", true)];
 
     let mut scenarios: Vec<ReproduceScenario> = Vec::new();
 
     for (name, communication) in scenarios_spec {
-        let subdir = format!("{}/{}", out_dir, name);
-        ensure_output_dir(&subdir);
         let seed = socsim_core::derive_seed(args.seed, &[communication as u64]);
         let cfg = Config {
-            n_firms: args.market.firms,
-            a: args.market.a,
-            beta: args.market.beta,
-            d: args.market.effective_d(),
-            c1: args.market.c1,
-            c2: args.market.c2,
-            persona,
             communication,
-            max_rounds,
             seed: Some(seed),
-            llm: LlmSettings {
-                temperature: args.temperature,
-                seed: args.llm_seed,
-                cache_path: Some(args.cache_path.clone()),
-            },
-            output_dir: subdir.clone(),
-            ..Config::default()
+            ..base_cfg.clone()
         };
+        let (cfg, client, _, _) = build_client(&cfg, args.mock);
+        let result = run_with_client(&cfg, client).unwrap_or_else(|e| panic!("実行に失敗: {}", e));
 
-        let result = run_one(&cfg, args.mock).unwrap_or_else(|e| panic!("実行に失敗: {}", e));
-
-        save_rounds(&result.rounds, &subdir);
-        save_metrics(&result.metrics, &subdir);
-        save_benchmarks(&result.benchmarks, &subdir);
-        save_llm_meta(&result, &cfg, &subdir);
-        let path = format!("{}/config.json", subdir);
-        write_json(&cfg.to_run_config_json(), &path).expect("config.json の書き込みに失敗");
+        // 2 シナリオが 1 本の run に同居するので，(step, scope, name) が衝突しない
+        // ようシナリオ名を指標名と unit_id の接頭辞にする．
+        for m in &result.metrics {
+            record::log_round(&mut rv, Some(name), m);
+        }
+        record::log_run_scalars(&mut rv, Some(name), &result);
+        record::log_benchmarks(&mut rv, Some(name), &result.benchmarks);
+        record::log_firms(&mut rv, Some(name), seed, max_rounds, &result);
 
         scenarios.push(ReproduceScenario {
             name,
-            communication,
             observed_avg_price: result.final_avg_price(),
             observed_collusion_index: result.final_collusion_index(),
-            rounds_to_stable: result.rounds_to_stable().map(|r| r as i64).unwrap_or(-1),
+            rounds_to_stable: result.rounds_to_stable(),
             final_round: result.final_round,
             p_bertrand: mean(&result.benchmarks.p_bertrand),
             p_cartel: mean(&result.benchmarks.p_cartel),
-            results_subdir: name.to_string(),
         });
     }
 
@@ -875,52 +1079,75 @@ fn cmd_reproduce(args: ReproduceArgs) {
 
     // --- アンカー判定 (Bertrand(6)/cartel(8) フレーム) ---
     let mut anchors: Vec<ReproduceAnchor> = Vec::new();
-    let mut push = |name: &str, paper: &str, obs: f64, lo: f64, hi: f64| {
+    let mut push = |id: &str, label: &str, paper: &str, obs: f64, lo: f64, hi: Option<f64>| {
         anchors.push(ReproduceAnchor {
-            name: name.to_string(),
+            id: id.to_string(),
+            label: label.to_string(),
             paper_value: paper.to_string(),
             observed: obs,
             target_lo: lo,
             target_hi: hi,
-            pass: obs >= lo && obs <= hi,
+            pass: obs >= lo && hi.map(|h| obs <= h).unwrap_or(true),
         });
     };
 
     // Fig.1 中核: 会話なしでも平均価格が (Bertrand, cartel) 区間内 (~7 に収束)．
     push(
+        "no_comm_avg_price_in_band",
         "no_comm avg_price in (p^B, p^M) (paper ~7)",
         "~7.0",
         base.observed_avg_price,
         p_bertrand,
-        p_cartel,
+        Some(p_cartel),
     );
     // 暗黙の共謀: CI が中域 (論文帯 0.3-0.8)．
     push(
+        "no_comm_collusion_index",
         "no_comm collusion_index (paper 0.3-0.8)",
         "0.3-0.8",
         base.observed_collusion_index,
         0.3,
-        0.8,
+        Some(0.8),
     );
     // Fig.2/4: 会話ありは共謀を弱めない (CI が会話なし以上 — εマージン)．
     let comm = &scenarios[1];
     push(
+        "communication_strengthens_collusion",
         "communication strengthens collusion (CI_comm >= CI_nocomm)",
         "comm >= no-comm",
         comm.observed_collusion_index - base.observed_collusion_index,
         -0.05,
-        f64::INFINITY,
+        None,
     );
 
     let n_pass = anchors.iter().filter(|a| a.pass).count();
     let n_anchors = anchors.len();
 
+    // 観測量は数なので指標に，帯と PASS/off はカテゴリなのでイベントに書く．
+    let observations: Vec<(String, f64)> =
+        anchors.iter().map(|a| (a.id.clone(), a.observed)).collect();
+    record::log_anchor_observations(&mut rv, &observations, n_pass);
+    for a in &anchors {
+        rv.log_event(
+            "x.han2023.anchor",
+            &record::AnchorEvent {
+                id: &a.id,
+                label: &a.label,
+                paper_value: &a.paper_value,
+                observed: a.observed,
+                target_lo: a.target_lo,
+                target_hi: a.target_hi,
+                pass: a.pass,
+            },
+        )
+        .expect("アンカーイベントの記録に失敗");
+    }
+
     println!("シナリオ:");
     for s in &scenarios {
-        let stable = if s.rounds_to_stable >= 0 {
-            s.rounds_to_stable.to_string()
-        } else {
-            "未達".to_string()
+        let stable = match s.rounds_to_stable {
+            Some(r) => r.to_string(),
+            None => "未達".to_string(),
         };
         println!(
             "  [{:<16}] avg_price={:.3} CI={:.3} 安定到達={} (round {})",
@@ -933,15 +1160,14 @@ fn cmd_reproduce(args: ReproduceArgs) {
         p_bertrand, p_cartel
     );
     for a in &anchors {
-        let hi = if a.target_hi.is_infinite() {
-            "∞".to_string()
-        } else {
-            format!("{:.2}", a.target_hi)
+        let hi = match a.target_hi {
+            Some(h) => format!("{:.2}", h),
+            None => "∞".to_string(),
         };
         println!(
             "[{}] {:<48} obs={:.4} target=[{:.2},{}] paper={}",
             if a.pass { "PASS" } else { "OFF " },
-            a.name,
+            a.label,
             a.observed,
             a.target_lo,
             hi,
@@ -951,26 +1177,10 @@ fn cmd_reproduce(args: ReproduceArgs) {
     println!("-------------------------------------------------");
     println!("{}/{} アンカーが in-band", n_pass, n_anchors);
 
-    let summary = ReproduceSummary {
-        command: "reproduce",
-        paper: "Han, Wu & Xiao (2023) SABM — Fig.1/2/4 (tacit collusion ~7 between Bertrand 6 and cartel 8)",
-        p_bertrand,
-        p_cartel,
-        mock: args.mock,
-        quick: args.quick,
-        scenarios,
-        anchors,
-        n_pass,
-        n_anchors,
-    };
-    let path = format!("{}/reproduce_summary.json", out_dir);
-    write_json(&summary, &path).expect("reproduce_summary.json の書き込みに失敗");
-
-    let _ = refresh_latest_symlink(&args.output_dir, &format!("{}_reproduce", ts));
-
-    println!("サマリ → {}/reproduce_summary.json", out_dir);
-    println!("各シナリオの rounds.csv / metrics.csv / benchmarks.json を各サブディレクトリに保存しました．");
-    println!("図 (Fig.1/2/4 風) は `uv run sabm-tools reproduce` で生成できます．");
+    let dir = rv.finish().expect("runvault: reproduce run の完了に失敗");
+    println!("シナリオ別の指標 → {}/metrics.csv", dir.display());
+    println!("アンカー判定     → {}/events.jsonl", dir.display());
+    println!("図 (Fig.1/2/4 風) は `uv run sabm-tools reproduce` で生成できる．");
 }
 
 // ---------------------------------------------------------------------------

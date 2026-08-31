@@ -13,7 +13,7 @@
 ## 典型的なワークフロー
 
 **「競争価格・共謀価格のベンチマークは?」**
-→ `cargo run --release -- benchmark …` → `benchmarks.json` を読む，または `uv run sabm-tools show-experiment-settings`．
+→ `cargo run --release -- benchmark …` → run の `metrics.csv` / `events.jsonl` を読む，または `uv run sabm-tools show-experiment-settings`．
 
 **「2 つの LLM 企業は暗黙に共謀するか?」**
 → `cargo run --release -- run --firms 2 --persona active --max-rounds 1000 --seed 42` → `uv run sabm-tools visualize` → 価格が (ベルトラン, カルテル) 帯に収束し collusion index が約 0.5 に近づく様子を見る．

@@ -11,7 +11,7 @@ LLM output is **outside** socsim's bit-reproducibility. The design therefore spl
 - **Deterministic socsim core** — the analytic Bertrand-equilibrium and cartel/monopoly prices (`p^B`, `p^M`), the linear-demand market clearing (`q_i = (α − β p_i + d Σ_{j≠i} p_j) / b`), the profit (`π_i = (p_i − c_i) q_i`), the collusion index (`CI = (p − p^B) / (p^M − p^B)`), the convergence/bounded-oscillation stop detection and the bounded 20-round memory updates. Given a seed these reproduce bit-for-bit (ChaCha20 `SimRng`). The analytic path is **quantitatively exact**: the basic setup gives `p^B = 6`, `p^M = 8`.
 - **Non-deterministic LLM layer** — the single `Decision` mechanism (`PricingDecision`), where each firm's next price is decided by the LLM from its bounded history, persona and the benchmark prices. Pseudo-determinised by `socsim-llm`'s `CachingClient` (a `hash(prompt+model)` → response cache), `temperature=0` and a fixed seed. The provider order is **Ollama first → OpenAI fallback** via `socsim-llm`'s `FallbackClient`.
 
-The cache — not the model — is the reproducibility mechanism: a warm cache replays identical responses, so a rerun is free and stable. Each run writes `llm_meta.json` recording the model, endpoint, temperature, seed and cache-hit rate. Because the local default model (`llama3.2`) differs from the paper's `gpt-4-0314`, the LLM-driven reproduction target is **qualitative** (the price settles inside the (Bertrand, cartel) interval, CI ∈ [0.3, 0.8]); the analytic benchmarks are exact.
+The cache — not the model — is the reproducibility mechanism: a warm cache replays identical responses, so a rerun is free and stable. Each run records the model, provider and temperature in the `llm` block of its runvault `run.json`, and the call count and cache-hit rate as run-scope metrics. Because the local default model (`llama3.2`) differs from the paper's `gpt-4-0314`, the LLM-driven reproduction target is **qualitative** (the price settles inside the (Bertrand, cartel) interval, CI ∈ [0.3, 0.8]); the analytic benchmarks are exact.
 
 > This project standardises on the `socsim-llm` crate for the LLM layer; it does **not** use `reqwest` or `sha2` (socsim-llm owns the HTTP transport and the prompt-cache hashing). The model is market-mediated — non-spatial and non-network — so it depends only on `socsim-core` + `socsim-engine` + `socsim-llm` (no `socsim-grid` / `socsim-net`).
 
@@ -23,7 +23,7 @@ cargo build --release
 
 # === Analytic benchmark only (no LLM, instant): basic setup → p^B=6, p^M=8 ===
 cargo run --release -- benchmark --a 14 --beta 0.0066667 --d 0.0033333 --c1 2 --c2 2
-# Writes results/{ts}/benchmarks.json
+# Writes a runvault run under results/sabm/
 
 # Make sure a local Ollama is running and a model is pulled, e.g.:
 #   ollama pull llama3.2:latest
@@ -42,7 +42,7 @@ uv sync
 uv run sabm-tools visualize
 
 # Inspect the run's settings and LLM metadata
-uv run sabm-tools show-experiment-settings --results-dir results/latest
+uv run sabm-tools show-experiment-settings
 ```
 
 ### Offline (no-LLM) smoke
@@ -70,7 +70,7 @@ uv run sabm-tools visualize-sweep
 
 ### Paper reproduction (Fig.1/2/4)
 
-`reproduce` runs the no-communication baseline (Fig.1) and the communication variant (Fig.2) in one shot, compares the observed average price and collusion index against the Bertrand(6)/cartel(8) frame, and writes a `reproduce_summary.json` (observed avg_price / collusion index vs paper + PASS/off). The Python `reproduce` tool then renders the headline figures into `<results>/figures/`.
+`reproduce` runs the no-communication baseline (Fig.1) and the communication variant (Fig.2) in one shot, compares the observed average price and collusion index against the Bertrand(6)/cartel(8) frame, and records the observed avg_price / collusion index as run-scope metrics with the PASS/off verdicts as `x.han2023.anchor` events. The Python `reproduce` tool then renders the headline figures into `results/sabm/figures/<run_slug>/`.
 
 ```bash
 # Live LLM end-to-end (or add --mock for offline); --quick caps rounds at 80

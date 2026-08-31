@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """reproduce_paper.py — Han, Wu & Xiao (2023) SABM 論文 Fig.1/2/4 一括再現レポート．
 
-Rust の `sabm reproduce` が書き出す `reproduce_summary.json` (会話なし / 会話あり 2
-シナリオの観測平均価格・collusion index と Bertrand(6)/cartel(8) フレームに対する
-PASS/off アンカー) を読み，論文の headline 図を再現する:
+Rust の `sabm reproduce` が書いた runvault の run ディレクトリを読み，論文の
+headline 図を再現する．会話なし / 会話あり 2 シナリオのラウンドごとの指標は
+`metrics.csv` の `<シナリオ>_avg_price` などが，企業ごとの価格軌跡は `events.jsonl` の
+`observation` 行が，Bertrand(6)/cartel(8) フレームに対する PASS/off アンカーは
+`x.han2023.anchor` 行が持つ (旧 `reproduce_summary.json` とシナリオ別サブ
+ディレクトリに相当する):
 
   - Fig.1 (会話なし): 価格軌跡が (Bertrand, cartel) 区間へ収束 (~7 の暗黙の共謀)．
   - Fig.2 (会話あり): 同じく価格軌跡 (会話は共謀を強める)．
@@ -15,11 +18,11 @@ PASS/off アンカー) を読み，論文の headline 図を再現する:
 Usage:
     sabm-tools reproduce
     sabm-tools reproduce --run --mock --quick
-    sabm-tools reproduce --results-dir results/20260530_000000_reproduce
+    sabm-tools reproduce --results-dir "$(runvault path --experiment sabm --latest --subcommand reproduce)"
     sabm-tools reproduce --json
 
 Outputs:
-    <results_dir>/figures/
+    results/sabm/figures/<run_slug>/
     ├── fig1_no_communication.png   ← 会話なしの価格軌跡 (Fig.1 風)
     ├── fig2_communication.png      ← 会話ありの価格軌跡 (Fig.2 風)
     └── fig4_collusion_compare.png  ← 会話なし/あり CI 時系列の比較 (Fig.4 風)
@@ -35,8 +38,9 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
+from runvault.read import config_parameters, events_table, figures_dir, runvault_path
 
-from socsim_tools.io import resolve_results_dir
+from sabm_tools.visualize import load_metrics, load_rounds
 
 # --------------------------------------------------------------------------- #
 # 日本語フォント・カラー設定 (visualize.py と統一)．
@@ -63,23 +67,95 @@ def _run_binary(seed: int, mock: bool, quick: bool) -> None:
     subprocess.run(cmd, check=True)
 
 
+SCENARIOS = ["no_communication", "communication"]
+
+
 def _load_summary(results_dir: Path) -> dict:
-    path = results_dir / "reproduce_summary.json"
-    if not path.exists():
-        raise FileNotFoundError(
-            f"reproduce_summary.json が見つかりません: {path}\n"
-            f"  先に `sabm-tools reproduce --run` を実行してください．"
-        )
-    with path.open(encoding="utf-8") as f:
-        return json.load(f)
+    """run ディレクトリから旧 `reproduce_summary.json` と同じ形の要約を組み直す．
+
+    runvault はこの要約をディスク上に持たない．シナリオごとの観測値は `metrics.csv` の
+    run スコープ指標が，アンカーの帯と PASS/off は `events.jsonl` の
+    `x.han2023.anchor` 行が持つので，そこから復元する．legacy の run ディレクトリは
+    `reproduce_summary.json` をそのまま読む．
+    """
+    legacy = results_dir / "reproduce_summary.json"
+    if legacy.exists():
+        with legacy.open(encoding="utf-8") as f:
+            return json.load(f)
+
+    from runvault.read import load_run_meta, run_scope_metrics
+
+    scoped = run_scope_metrics(results_dir)
+    params = config_parameters(results_dir)
+    # 何を再現しようとしているかは run.json の research ブロックが持つ
+    # (旧 reproduce_summary.json は同じ文言を自前で埋めていた)．
+    research = (load_run_meta(results_dir) or {}).get("research") or {}
+    targets = research.get("targets") or [{}]
+    paper = " — ".join(
+        x for x in (research.get("work", {}).get("title"), targets[0].get("label")) if x
+    )
+
+    scenarios = []
+    for name in params.get("scenarios", SCENARIOS):
+        metrics = load_metrics(str(results_dir), prefix=name)
+        if metrics.empty:
+            continue
+        last = metrics.iloc[-1]
+        scenarios.append({
+            "name": name,
+            "communication": name == "communication",
+            "observed_avg_price": float(last["avg_price"]),
+            "observed_collusion_index": float(last["collusion_index"]),
+            # 未達は指標そのものを書かない (旧 JSON は -1 を書いていた)
+            "rounds_to_stable": int(scoped.get(f"{name}_rounds_to_stable", -1)),
+            # 旧 final_round はエンジンのクロック．ラウンド番号 + 1 に当たる
+            "final_round": int(last["round"]) + 1,
+            "p_bertrand": scoped[f"{name}_p_bertrand_mean"],
+            "p_cartel": scoped[f"{name}_p_cartel_mean"],
+            "results_subdir": name,
+        })
+
+    anchors = []
+    for _, ev in events_table(results_dir, kind="x.han2023.anchor").iterrows():
+        hi = ev.get("target_hi")
+        anchors.append({
+            "name": ev["label"],
+            "paper_value": ev["paper_value"],
+            "observed": float(ev["observed"]),
+            "target_lo": float(ev["target_lo"]),
+            # 上限なしのアンカーは列ごと落としてあるので None に戻す
+            "target_hi": None if hi is None or pd.isna(hi) else float(hi),
+            "pass": bool(ev["pass"]),
+        })
+
+    base = scenarios[0] if scenarios else {"p_bertrand": float("nan"), "p_cartel": float("nan")}
+    return {
+        "command": "reproduce",
+        "paper": paper,
+        "p_bertrand": base["p_bertrand"],
+        "p_cartel": base["p_cartel"],
+        "mock": bool(params.get("mock", False)),
+        "quick": bool(params.get("quick", False)),
+        "scenarios": scenarios,
+        "anchors": anchors,
+        "n_pass": int(scoped.get("checks_passed", sum(a["pass"] for a in anchors))),
+        "n_anchors": int(scoped.get("checks_total", len(anchors))),
+    }
 
 
-def _load_scenario(results_dir: Path, subdir: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """シナリオサブディレクトリの rounds.csv / metrics.csv を読む．"""
-    base = results_dir / subdir
-    rounds = pd.read_csv(base / "rounds.csv")
-    metrics = pd.read_csv(base / "metrics.csv")
-    return rounds, metrics
+def _load_scenario(results_dir: Path, name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """1 シナリオの企業ごとの軌跡とラウンド指標を読む．
+
+    runvault では 2 シナリオが 1 本の run に同居するので，シナリオ名が指標名と
+    `unit_id` の接頭辞になっている．legacy はシナリオ名のサブディレクトリを読む．
+    """
+    legacy = results_dir / name
+    if (legacy / "rounds.csv").exists():
+        return pd.read_csv(legacy / "rounds.csv"), pd.read_csv(legacy / "metrics.csv")
+    return (
+        load_rounds(str(results_dir), prefix=name),
+        load_metrics(str(results_dir), prefix=name),
+    )
 
 
 def _save_trajectory(
@@ -206,8 +282,13 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--results-dir", "--results_dir", default=None)
-    parser.add_argument("--output-dir", "--output_dir", default=None, help="図の保存先 (既定: <results>/figures)")
+    parser.add_argument("--results-dir", "--results_dir", default=None,
+                        help=("reproduce の run ディレクトリ．未指定時は runvault に"
+                              "最新の run を聞く (--experiment sabm --subcommand reproduce)．"))
+    parser.add_argument("--results-root", "--results_root", default="results",
+                        help="--results-dir 未指定時に runvault が探す results ルート (既定: results)")
+    parser.add_argument("--output-dir", "--output_dir", default=None,
+                        help="図の保存先 (既定: results/sabm/figures/<run_slug>)")
     parser.add_argument("--run", action="store_true", help="先に Rust バイナリ (sabm reproduce) を実行する．")
     parser.add_argument("--mock", action="store_true", help="--run 時に scripted mock を使う (オフライン)．")
     parser.add_argument("--quick", action="store_true", help="--run 時に短縮再現 (max_rounds=80)．")
@@ -218,7 +299,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.run:
         _run_binary(args.seed, args.mock, args.quick)
 
-    results_dir = resolve_results_dir(args.results_dir)
+    if args.results_dir is None:
+        results_dir = Path(
+            runvault_path("sabm", args.results_root, subcommand="reproduce")
+        )
+    else:
+        results_dir = Path(args.results_dir)
     try:
         summary = _load_summary(results_dir)
     except FileNotFoundError as exc:
@@ -231,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
 
     _print_table(summary)
 
-    out_dir = Path(args.output_dir) if args.output_dir else results_dir / "figures"
+    out_dir = Path(args.output_dir) if args.output_dir else Path(figures_dir(results_dir))
     out_dir.mkdir(parents=True, exist_ok=True)
     print("-" * 78)
     print(f"図の出力先: {out_dir}")

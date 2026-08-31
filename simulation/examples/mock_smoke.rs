@@ -1,10 +1,9 @@
 //! Mock 駆動のスモーク実行 (ライブ LLM 不要)．
 //!
 //! ライブ Ollama/OpenAI が使えない環境 (CI・ネットワーク遮断サンドボックス) で
-//! 出力パイプライン (rounds.csv / metrics.csv / benchmarks.json / llm_meta.json /
-//! config.json) と Python 可視化を検証するための補助バイナリ．
-//! `socsim-llm::mock::ScriptedClient` で決定論的に価格を駆動し，本番 `run` と同じ
-//! writer で結果を書き出す．LLM ライブ呼び出しは 0 回．
+//! 出力パイプライン (run ディレクトリ・metrics.csv・events.jsonl) と Python 可視化を
+//! 検証するための補助バイナリ．`socsim-llm::mock::ScriptedClient` で決定論的に価格を
+//! 駆動する．LLM ライブ呼び出しは 0 回．
 //!
 //! ```bash
 //! cargo run --release --example mock_smoke -- results
@@ -16,27 +15,23 @@
 
 use std::env;
 
-use socsim_results::{refresh_latest_symlink, timestamp, write_json};
-
+use runvault::{Run, RunOptions};
 use sabm_simulation::config::Config;
 use sabm_simulation::llm::wrap_client;
 use sabm_simulation::prompts::parse_price;
-use sabm_simulation::simulation::{
-    ensure_output_dir, run_with_client, save_benchmarks, save_llm_meta, save_metrics, save_rounds,
-};
+use sabm_simulation::record::{self, RunParameters, DOMAIN, EXPERIMENT, REPO_ID};
+use sabm_simulation::simulation::run_with_client;
 use socsim_llm::mock::ScriptedClient;
 use socsim_llm::PromptCache;
 
 fn main() {
     let base = env::args().nth(1).unwrap_or_else(|| "results".to_string());
-    let timestamp = timestamp();
-    let output_dir = format!("{base}/{timestamp}");
+    let seed = 42u64;
 
     let cfg = Config {
         n_firms: 2,
         max_rounds: 60,
-        seed: Some(42),
-        output_dir: output_dir.clone(),
+        seed: Some(seed),
         ..Config::default()
     };
 
@@ -49,22 +44,36 @@ fn main() {
         format!("{{\"price\": {next:.4}}}")
     });
     let client = wrap_client(backend, PromptCache::in_memory());
+    // モデル名と endpoint は Run::start より前に要る (llm ブロックは開始時に確定する)．
+    let model = client.inner().model().to_string();
+    let endpoint = client.inner().endpoint().to_string();
 
-    ensure_output_dir(&cfg.output_dir);
+    let parameters = RunParameters::new(&cfg, 1, seed, true);
+
+    let mut rv = Run::start(
+        RunOptions::new(EXPERIMENT, "mock-smoke")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&base)
+            .parameters(&parameters)
+            .expect("runvault: parameters の組み立てに失敗")
+            .seed_pointers(["/seed"])
+            .master_seed(seed)
+            .llm(record::llm_block(&model, &endpoint, cfg.llm.temperature))
+            .replication(record::replication()),
+    )
+    .expect("runvault: run の開始に失敗");
+
     let result = run_with_client(&cfg, client).expect("mock run failed");
-    save_rounds(&result.rounds, &cfg.output_dir);
-    save_metrics(&result.metrics, &cfg.output_dir);
-    save_benchmarks(&result.benchmarks, &cfg.output_dir);
-    save_llm_meta(&result, &cfg, &cfg.output_dir);
+    for m in &result.metrics {
+        record::log_round(&mut rv, None, m);
+    }
+    record::log_run_scalars(&mut rv, None, &result);
+    record::log_benchmarks(&mut rv, None, &result.benchmarks);
+    record::log_firms(&mut rv, None, seed, cfg.max_rounds, &result);
 
-    // config.json (pretty-JSON は socsim_results::write_json に委譲, バイト等価)．
-    let cfg_path = format!("{}/config.json", cfg.output_dir);
-    write_json(&cfg.to_run_config_json(), &cfg_path).unwrap();
-
-    // latest symlink (socsim_results に委譲)．
-    let _ = refresh_latest_symlink(&base, &timestamp);
-
-    println!("mock smoke wrote: {output_dir}");
+    let dir = rv.finish().expect("runvault: run の完了に失敗");
+    println!("mock smoke wrote: {}", dir.display());
     println!(
         "rounds={} final_round={} final_avg_price={:.3} final_CI={:.3} live_llm_calls=0 cache_hits={}",
         result.rounds.len(),

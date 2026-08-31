@@ -13,7 +13,7 @@ This project reimplements Han, Wu & Xiao (2023)'s SABM — two LLM "firm" agents
 ## Typical workflows
 
 **"What are the competitive and collusive price benchmarks?"**
-→ `cargo run --release -- benchmark …` → read `benchmarks.json`, or `uv run sabm-tools show-experiment-settings`.
+→ `cargo run --release -- benchmark …` → read the run's `metrics.csv` / `events.jsonl`, or `uv run sabm-tools show-experiment-settings`.
 
 **"Do two LLM firms tacitly collude?"**
 → `cargo run --release -- run --firms 2 --persona active --max-rounds 1000 --seed 42` → `uv run sabm-tools visualize` → look at the price trajectory settling inside the (Bertrand, cartel) band and the collusion index approaching ~0.5.

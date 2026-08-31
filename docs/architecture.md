@@ -63,7 +63,7 @@ Collusion index: `CI_i = (p_i − p_i^B) / (p_i^M − p_i^B) ∈ [0, 1]` (0 = Be
 ## Two-layer determinism
 
 - **socsim core** is bit-deterministic from the seed: initial prices via `derive_seed(root, &[RNG_WORLD_INIT=0])`, the engine RNG via `derive_seed(root, &[RNG_ENGINE=1])`. Market clearing, profit, the analytic benchmarks and memory updates are pure functions of the world state.
-- **LLM layer** is pseudo-deterministic via the prompt→response cache, `temperature=0` and a fixed seed; recorded in `llm_meta.json`.
+- **LLM layer** is pseudo-deterministic via the prompt→response cache, `temperature=0` and a fixed seed; recorded in the `llm` block of `run.json` and in the run-scope `llm_calls` / `llm_cache_hits` / `llm_cache_hit_rate` metrics.
 
 ## LLM layer
 
@@ -71,7 +71,7 @@ Collusion index: `CI_i = (p_i − p_i^B) / (p_i^M − p_i^B) ∈ [0, 1]` (0 = Be
 
 ## Outputs
 
-`results/{ts}/` (+ a `latest` symlink): `config.json`, `rounds.csv` (long: round, firm_id, price, quantity, profit), `metrics.csv` (round, avg_price, collusion_index, total_profit), `benchmarks.json` (p_bertrand, p_cartel), `llm_meta.json` (provider/model/endpoint/temperature/seed/cache_hits), and for sweeps `sweep_summary.csv` + `sweep_config.json`.
+A runvault run directory under `results/sabm/`. runvault creates and names it; there is no `latest` symlink. `config.json` is the envelope (conditions under `parameters`) and `run.json` carries identity (repo, git commit, hashes, `master_seed`, the `llm` block, the paper metadata). `metrics.csv` is long (`run_uid, step, step_unit, scope, name, value`): per round (`step_unit=round`, `scope=run`) `avg_price` / `collusion_index` / `total_profit`, and without a step `p_bertrand_mean` / `p_cartel_mean` / `rounds_to_stable` / the LLM call counts. `events.jsonl` carries the per-firm price path — one `observation` per (firm, round) with `price` / `quantity` / `profit`, and a `terminal` row per firm — plus the per-firm analytic benchmarks as `x.han2023.benchmark`. A row keyed by both a round **and** a firm cannot be a metric row: `metrics.csv` has no column for a series id. A sweep is a parent run (the grid) plus one `sweep-point` child per condition, whose `events.jsonl` holds one `terminal` row per trial.
 
 ## References
 

@@ -13,7 +13,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use rand::Rng;
-use serde::Serialize;
 
 use socsim_core::{derive_seed, AgentId, SimClock, SimRng};
 use socsim_engine::{SequentialScheduler, SimulationBuilder};
@@ -21,7 +20,7 @@ use socsim_llm::MetadataCollector;
 
 use crate::analytic::{bertrand_prices, cartel_prices};
 use crate::config::Config;
-use crate::llm::{build_live_client, SabmClient};
+use crate::llm::SabmClient;
 use crate::mechanisms::{
     CommunicationPhase, MarketClearing, MarketEnvironment, MemoryUpdate, PricingDecision,
     ProfitReward, SharedClient, SharedMetadata, SharedMetrics, SharedRounds,
@@ -134,16 +133,9 @@ pub fn init_world(cfg: &Config, rng: &mut SimRng) -> MarketWorld {
     }
 }
 
-/// シミュレーションを実行する (本番 LLM クライアントを構築して駆動)．
-pub fn run(cfg: &Config) -> std::result::Result<SimulationResult, String> {
-    let client =
-        build_live_client(&cfg.llm).map_err(|e| format!("LLM クライアント構築に失敗: {e}"))?;
-    run_with_client(cfg, client)
-}
-
 /// 与えられた [`SabmClient`] でシミュレーションを実行する．
 ///
-/// 本番は [`build_live_client`] の結果を，テストは [`crate::llm::wrap_client`] で
+/// 本番は [`crate::llm::build_live_client`] の結果を，テストは [`crate::llm::wrap_client`] で
 /// ラップした `mock::ScriptedClient` を渡す．Scheduler は `sequential` (同期更新の
 /// 価格モデルは順序非依存なので決定論)．
 pub fn run_with_client(
@@ -215,98 +207,6 @@ pub fn run_with_client(
         llm_endpoint,
         final_round,
     })
-}
-
-// --------------------------------------------------------------------------- //
-// 出力
-// --------------------------------------------------------------------------- //
-
-/// 出力ディレクトリを作成する．
-pub fn ensure_output_dir(output_dir: &str) {
-    socsim_results::ensure_dir(output_dir).expect("出力ディレクトリの作成に失敗");
-}
-
-/// `rounds.csv` を保存する (long-format)．
-///
-/// 各行 [`RoundRow`] を `serialize` し先頭にヘッダを書く csv クレットの標準挙動を
-/// `socsim_results::write_csv` に委譲する (従来の手書き writer とバイト等価)．
-pub fn save_rounds(rounds: &[RoundRow], output_dir: &str) {
-    let path = format!("{}/rounds.csv", output_dir);
-    socsim_results::write_csv(rounds, &path).expect("rounds.csv の書き込みに失敗");
-}
-
-/// `metrics.csv` を保存する (writer は `socsim_results::write_csv` に委譲; バイト等価)．
-pub fn save_metrics(metrics: &[MetricRow], output_dir: &str) {
-    let path = format!("{}/metrics.csv", output_dir);
-    socsim_results::write_csv(metrics, &path).expect("metrics.csv の書き込みに失敗");
-}
-
-/// `benchmarks.json` の構造体．
-#[derive(Serialize)]
-pub struct BenchmarksJson {
-    pub p_bertrand: Vec<f64>,
-    pub p_cartel: Vec<f64>,
-    /// 全社平均 (基本設定の検算用; 基本設定なら 6.0 / 8.0)．
-    pub p_bertrand_mean: f64,
-    pub p_cartel_mean: f64,
-}
-
-/// `benchmarks.json` を保存する．
-pub fn save_benchmarks(bench: &Benchmarks, output_dir: &str) {
-    let json = BenchmarksJson {
-        p_bertrand: bench.p_bertrand.clone(),
-        p_cartel: bench.p_cartel.clone(),
-        p_bertrand_mean: mean(&bench.p_bertrand),
-        p_cartel_mean: mean(&bench.p_cartel),
-    };
-    // pretty-print JSON の書き出しは socsim_results::write_json に委譲する
-    // (内部は serde_json::to_writer_pretty + flush; 従来の writer とバイト等価)．
-    let path = format!("{}/benchmarks.json", output_dir);
-    socsim_results::write_json(&json, &path).expect("benchmarks.json の書き込みに失敗");
-}
-
-/// `llm_meta.json` の構造体 (provider/model/endpoint/temperature/seed/cache 統計)．
-#[derive(Serialize)]
-pub struct LlmMetaJson {
-    pub llm_model: String,
-    pub llm_endpoint: String,
-    pub llm_temperature: f32,
-    pub llm_seed: u64,
-    pub total_calls: usize,
-    pub cache_hits: usize,
-    pub cache_hit_rate: f64,
-    pub final_round: usize,
-    pub final_avg_price: f64,
-    pub final_collusion_index: f64,
-    pub determinism_note: &'static str,
-}
-
-/// `llm_meta.json` を保存する．
-pub fn save_llm_meta(result: &SimulationResult, cfg: &Config, output_dir: &str) {
-    let meta = LlmMetaJson {
-        llm_model: result.llm_model.clone(),
-        llm_endpoint: result.llm_endpoint.clone(),
-        llm_temperature: cfg.llm.temperature,
-        llm_seed: cfg.llm.seed,
-        total_calls: result.metadata.total(),
-        cache_hits: result.metadata.cache_hits(),
-        cache_hit_rate: result.metadata.cache_hit_rate(),
-        final_round: result.final_round,
-        final_avg_price: result.final_avg_price(),
-        final_collusion_index: result.final_collusion_index(),
-        determinism_note: "LLM output is outside socsim bit-reproducibility; the prompt->response \
-                           cache (with temperature=0 and fixed seed) is the reproducibility \
-                           mechanism. The socsim core (initial prices, market clearing via the \
-                           linear demand function, profit, the analytic Bertrand/cartel \
-                           benchmarks, and bounded-memory updates) is deterministic given the \
-                           seed.",
-    };
-    // llm_meta.json の値の出所は従来どおり result / cfg のまま (LlmMetaJson の構造・
-    // フィールド名・順序・determinism_note を保持)．writer (pretty-JSON + flush) のみ
-    // socsim_results::write_json に委譲する (バイト等価)．`RunMetadata::summary()` は
-    // cache-hit 100% 再実行や呼び出し 0 件で endpoint/model が変わりうるため使わない．
-    let path = format!("{}/llm_meta.json", output_dir);
-    socsim_results::write_json(&meta, &path).expect("llm_meta.json の書き込みに失敗");
 }
 
 #[cfg(test)]

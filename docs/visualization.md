@@ -2,15 +2,18 @@
 
 # Visualization (`sabm-tools`)
 
-The Python tools live in `tools/` (module `sabm_tools`). Install with `uv sync` at the workspace root, then invoke via `uv run sabm-tools <subcommand>`. They read the Rust simulation's output CSV/JSON; matplotlib / pandas / numpy only.
+The Python tools live in `tools/` (module `sabm_tools`). Install with `uv sync` at the workspace root, then invoke via `uv run sabm-tools <subcommand>`. They read the runvault run directories the Rust simulation writes.
+
+Which run to read is answered by runvault: omit `--results-dir` and the tools call `runvault path --latest`. They never scan `results/` for the newest-looking directory. Figures are written *beside* the run (`results/sabm/figures/{run_slug}/`), never inside it — `manifest.csv` is settled by `finish()`, so anything added afterwards would carry no hash.
 
 ## `visualize` — single run
 
 ```bash
-uv run sabm-tools visualize --results-dir results/latest
+uv run sabm-tools visualize
+uv run sabm-tools visualize --results-dir "$(runvault path --experiment sabm --latest --subcommand run --standalone)"
 ```
 
-Reads `rounds.csv`, `metrics.csv` and `benchmarks.json`, and writes to `{results_dir}/figures/`:
+Reads the per-firm price path from the run's `observation` events, the per-round market metrics from `metrics.csv` (turned back into one row per round by `runvault.read.metrics_wide`) and the analytic frame from the run-scope `p_bertrand_mean` / `p_cartel_mean`, and writes to `results/sabm/figures/{run_slug}/`:
 
 - **`price_trajectory.png`** — each firm's price and the all-firm average over rounds, with the Bertrand-equilibrium (`p^B`) and cartel (`p^M`) dashed reference lines and the shaded (Bertrand, cartel) band. This is the Fig.1/2-style plot: tacit collusion shows as the average price settling *inside* the band.
 - **`collusion_index.png`** — the collusion-index time series, `CI = (p − p^B) / (p^M − p^B)`, with reference lines at 0 (Bertrand) and 1 (cartel) and the shaded paper band CI ≈ 0.3–0.8.
@@ -18,10 +21,11 @@ Reads `rounds.csv`, `metrics.csv` and `benchmarks.json`, and writes to `{results
 ## `visualize-sweep` — sensitivity sweep
 
 ```bash
-uv run sabm-tools visualize-sweep --sweep-dir results/<ts>_sweep
+uv run sabm-tools visualize-sweep
+uv run sabm-tools visualize-sweep --sweep-dir "$(runvault path --experiment sabm --latest --subcommand sweep)"
 ```
 
-Reads `sweep_summary.csv` and writes to `{sweep_dir}/figures/`:
+Rebuilds the one-row-per-trial table from the sweep parent's children (`runvault.read.sweep_events_table`: each child's `parameters` for `firms` / `d_beta`, its `terminal` events for the trials) and writes to `results/sabm/figures/{run_slug}/`:
 
 - **`sweep_ci_by_dbeta.png`** — mean final collusion index vs `d/β`, one line per firm count, with the shaded tacit-collusion band.
 - **`sweep_ci_heatmap.png`** — collusion index as a `(d/β × firm count)` heatmap (only when more than one firm count is present).
@@ -29,20 +33,21 @@ Reads `sweep_summary.csv` and writes to `{sweep_dir}/figures/`:
 ## `show-experiment-settings` — settings & metadata
 
 ```bash
-uv run sabm-tools show-experiment-settings --results-dir results/latest
-uv run sabm-tools show-experiment-settings --results-dir results/latest --json
+uv run sabm-tools show-experiment-settings
+uv run sabm-tools show-experiment-settings --results-dir "$(runvault path --experiment sabm --latest --subcommand run --standalone)"
+uv run sabm-tools show-experiment-settings --json
 ```
 
-Renders `config.json` (or `sweep_config.json`), the analytic `benchmarks.json` (p^B / p^M), and the LLM `llm_meta.json` (model, endpoint, temperature, seed, cache-hit rate, final price / collusion index). `--json` emits a machine-readable payload.
+Renders the run configuration (`config.json`, under `parameters`) — which subcommand it belongs to is answered by `run.json` — the analytic frame (p^B / p^M from the run-scope metrics), and the LLM metadata (model, provider and temperature from the `llm` block of `run.json`; total calls and cache-hit rate from the run-scope metrics). Legacy `results/{timestamp}/` directories with a flat `config.json` / `sweep_config.json` / `benchmarks.json` / `llm_meta.json` still read. `--json` emits a machine-readable payload.
 
 ## `reproduce` — paper Fig.1/2/4 batch
 
 ```bash
-uv run sabm-tools reproduce                  # reads the latest *_reproduce results
+uv run sabm-tools reproduce                  # reads the latest reproduce run
 uv run sabm-tools reproduce --run --mock --quick   # run the Rust binary first, offline
 ```
 
-Reads `reproduce_summary.json` and the per-scenario `rounds.csv` / `metrics.csv`, prints the PASS/off anchor table, and renders three figures into `<results>/figures/`: `fig1_no_communication.png` (no-communication price trajectory), `fig2_communication.png` (communication variant), and `fig4_collusion_compare.png` (the no-communication vs communication collusion-index comparison). `--run` invokes `sabm reproduce` first (passing `--mock` / `--quick` / `--seed` through); `--json` emits the summary without figures.
+Rebuilds the summary from the reproduce run — the per-scenario price path from `metrics.csv` and the `observation` events, the anchor bands and verdicts from the `x.han2023.anchor` rows of `events.jsonl` — prints the PASS/off anchor table, and renders three figures into `results/sabm/figures/{run_slug}/`: `fig1_no_communication.png` (no-communication price trajectory), `fig2_communication.png` (communication variant), and `fig4_collusion_compare.png` (the no-communication vs communication collusion-index comparison). `--run` invokes `sabm reproduce` first (passing `--mock` / `--quick` / `--seed` through); `--json` emits the summary without figures.
 
 ---
 *This file was generated by Claude Code.*

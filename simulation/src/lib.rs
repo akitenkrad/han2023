@@ -6,8 +6,9 @@
 //! 繰り返し価格ゲームの公開 API を提供する．設定 (`config`)・需要関数 (`demand`)・
 //! 解析ベンチマーク (`analytic`)・世界状態 (`world`)・LLM クライアント層 (`llm`)・
 //! プロンプト生成と応答パース (`prompts`)・更新メカニズム (`mechanisms`)・実行
-//! ドライバ (`simulation`)・集計メトリクス (`metrics`) をモジュールとして公開し，
-//! バイナリ (`sabm`) と統合テストの双方から利用する．
+//! ドライバ (`simulation`)・集計メトリクス (`metrics`)・runvault への記録
+//! (`record`) をモジュールとして公開し，バイナリ (`sabm`) と統合テストの双方から
+//! 利用する．
 //!
 //! # 二層決定論
 //!
@@ -32,5 +33,6 @@ pub mod llm;
 pub mod mechanisms;
 pub mod metrics;
 pub mod prompts;
+pub mod record;
 pub mod simulation;
 pub mod world;

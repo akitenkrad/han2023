@@ -54,7 +54,7 @@ cargo run --release -- reproduce --seed 42 --mock --quick   # offline structural
 uv run sabm-tools reproduce                                 # renders fig1/fig2/fig4 + PASS table
 ```
 
-It writes `reproduce_summary.json` with the analytic frame (`p_bertrand`, `p_cartel`), per-scenario `observed_avg_price` / `observed_collusion_index` / `rounds_to_stable`, and PASS/off anchors:
+It records the analytic frame (`{scenario}_p_bertrand_mean`, `{scenario}_p_cartel_mean`), the per-scenario price path and `rounds_to_stable` in `metrics.csv`, and the PASS/off anchors as `x.han2023.anchor` events:
 
 | Anchor | Target | Reads |
 | --- | --- | --- |

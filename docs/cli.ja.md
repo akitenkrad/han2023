@@ -13,7 +13,7 @@
 
 ## `benchmark` — 解析価格のみ (LLM 不要・即時)
 
-ベルトラン均衡価格とカルテル/独占価格を計算し `benchmarks.json` を書き出す．ライブ LLM には一切触れない．
+ベルトラン均衡価格とカルテル/独占価格を計算する．ライブ LLM には一切触れず RNG も使わないので，`domain = analysis`・`master_seed` なしで記録する．全社平均は `metrics.csv` (`p_bertrand_mean` / `p_cartel_mean`) へ，企業ごとの値は `x.han2023.benchmark` イベントへ置く — 時間軸を持たない系列は指標にできないためである．
 
 ```bash
 cargo run --release -- benchmark --a 14 --beta 0.0066667 --d 0.0033333 --c1 2 --c2 2
@@ -41,7 +41,7 @@ cargo run --release -- run --firms 2 --persona active \
 
 `--communication` は**フラグ**型 (付ければ会話あり; 付けなければ論文の会話なし基本ケース)．付けると価格決定の前に `CommunicationPhase` が走り，各社が短い cheap-talk メッセージを発して次ラウンドの価格プロンプトへ注入される．ペルソナ (`--persona`) と非対称限界費用 (`--c1` / `--c2`) は結果の価格をずらす — 高コスト社ほど高い価格に収束する．
 
-`rounds.csv`・`metrics.csv`・`benchmarks.json`・`llm_meta.json`・`config.json` を書き出し `results/latest` を更新する．
+runvault の run ディレクトリ (`results/sabm/run_{timestamp}_{hash}/`) を書き出す: `metrics.csv` (ラウンドごとの `avg_price` / `collusion_index` / `total_profit`，ラウンドを持たない `p_bertrand_mean` / `p_cartel_mean` / `rounds_to_stable` と LLM 呼び出しの内訳)・`events.jsonl` ((企業, ラウンド) ごとの `observation` が `price` / `quantity` / `profit` を，企業ごとの `terminal`，企業ごとの `x.han2023.benchmark`)・`config.json`．`latest` シンボリックリンクは作らない — 場所は `runvault path --experiment sabm --latest --subcommand run --standalone` で解決する．`--runs N` のとき詳細を残すのは最後の試行だけで，これは移行前と同じ (先行する試行はキャッシュを温めるだけ)．
 
 ## `sweep` — d/β × 企業数 感度分析
 
@@ -51,7 +51,7 @@ cargo run --release -- sweep \
     --max-rounds 400 --runs 5 --seed 42
 ```
 
-フラグ: `--d-beta-values`・`--firms-values`・`--a`・`--beta`・`--cost`・`--persona`・`--communication`・`--max-rounds`・`--runs`・`--seed`・`--temperature`・`--llm-seed`・`--cache-path`・`--output-dir`・`--mock`．`sweep_summary.csv` + `sweep_config.json` を書き出す．
+フラグ: `--d-beta-values`・`--firms-values`・`--a`・`--beta`・`--cost`・`--persona`・`--communication`・`--max-rounds`・`--runs`・`--seed`・`--temperature`・`--llm-seed`・`--cache-path`・`--output-dir`・`--mock`．親 run (`subcommand=sweep`．格子の定義そのものを持ち，1 本のシミュレーションではないので `master_seed` を名乗らない) と，条件ごとの子 run (`subcommand=sweep-point`．`parameters` が `firms` / `d_beta` を持つ) を書き出す．子の `events.jsonl` が試行 1 本ごとの `terminal` 行 (旧 `sweep_summary.csv` の列) を，`metrics.csv` が条件の集約を `scope=run` で持つ．試行ごとの値は `metrics.csv` には置けない — 主キーが `(run_uid, name, step, step_unit, scope)` なので同一条件の試行が重複する．
 
 ## `reproduce` — 論文 Fig.1/2/4 一括再現
 
@@ -60,7 +60,7 @@ cargo run --release -- reproduce --seed 42            # 実 LLM
 cargo run --release -- reproduce --seed 42 --mock --quick   # オフライン・80 ラウンド
 ```
 
-会話なし baseline (Fig.1) と会話あり変種 (Fig.2) を実行し，観測した平均価格と collusion index をベルトラン(6)/カルテル(8) フレームと照合して `reproduce_summary.json` (シナリオごとの `observed_avg_price` / `observed_collusion_index`，解析フレーム，PASS/off アンカー) と各シナリオの `rounds.csv` / `metrics.csv` / `benchmarks.json` を `<ts>_reproduce/` 配下に書き出す．フラグ: 上記の市場フラグ・`--persona`・`--max-rounds`・`--seed`・`--temperature`・`--llm-seed`・`--cache-path`・`--output-dir`・`--mock`・`--quick`．図は `uv run sabm-tools reproduce` で描画する．
+会話なし baseline (Fig.1) と会話あり変種 (Fig.2) を実行し，観測した平均価格と collusion index をベルトラン(6)/カルテル(8) フレームと照合して 1 本の run (`subcommand=reproduce`) を書き出す．2 シナリオが同居するので，シナリオ名を指標名 (`no_communication_avg_price` など) と `unit_id` (`communication-firm-0` など) の接頭辞にする — `(step, scope, name)` が主キーだからである．アンカーの観測量は `anchor_{id}` 指標と `checks_passed` / `checks_total`，帯と PASS/off は `x.han2023.anchor` イベント (比較の向きと判定はカテゴリであって数ではない)．帯は論文が報告した値 (ベルトラン 6 / カルテル 8 のフレーム) とこの再現実装が置いた定性的アンカーが混ざるので，どちらも `reference.csv` には書かない．フラグ: 上記の市場フラグ・`--persona`・`--max-rounds`・`--seed`・`--temperature`・`--llm-seed`・`--cache-path`・`--output-dir`・`--mock`・`--quick`．図は `uv run sabm-tools reproduce` で描画する．
 
 ## オフラインスモーク (ライブ LLM 不要)
 

@@ -63,7 +63,7 @@ collusion index: `CI_i = (p_i − p_i^B) / (p_i^M − p_i^B) ∈ [0, 1]` (0=ベ�
 ## 二層決定論
 
 - **socsim コア** は seed から bit 決定論的: 初期価格は `derive_seed(root, &[RNG_WORLD_INIT=0])`，engine RNG は `derive_seed(root, &[RNG_ENGINE=1])`．市場クリアリング・利益・解析ベンチマーク・メモリ更新は世界状態の純関数．
-- **LLM レイヤ** はプロンプト→応答キャッシュ・`temperature=0`・固定 seed で擬似決定論化．`llm_meta.json` に記録．
+- **LLM レイヤ** はプロンプト→応答キャッシュ・`temperature=0`・固定 seed で擬似決定論化．`run.json` の `llm` ブロックと，run スコープの `llm_calls` / `llm_cache_hits` / `llm_cache_hit_rate` に記録．
 
 ## LLM レイヤ
 
@@ -71,7 +71,7 @@ collusion index: `CI_i = (p_i − p_i^B) / (p_i^M − p_i^B) ∈ [0, 1]` (0=ベ�
 
 ## 出力
 
-`results/{ts}/` (+ `latest` symlink): `config.json`・`rounds.csv` (long: round, firm_id, price, quantity, profit)・`metrics.csv` (round, avg_price, collusion_index, total_profit)・`benchmarks.json` (p_bertrand, p_cartel)・`llm_meta.json` (provider/model/endpoint/temperature/seed/cache_hits)，スイープでは `sweep_summary.csv` + `sweep_config.json`．
+`results/sabm/` 配下の runvault の run ディレクトリ．作成と命名は runvault が持ち，`latest` シンボリックリンクは無い．`config.json` は封筒 (条件は `parameters` の下)，`run.json` が同一性 (repo・git commit・各種ハッシュ・`master_seed`・`llm` ブロック・対象論文) を持つ．`metrics.csv` は long (`run_uid, step, step_unit, scope, name, value`) で，ラウンドごと (`step_unit=round`, `scope=run`) に `avg_price` / `collusion_index` / `total_profit`，ラウンドを持たない値として `p_bertrand_mean` / `p_cartel_mean` / `rounds_to_stable` と LLM 呼び出しの内訳．`events.jsonl` が企業ごとの価格軌跡 — (企業, ラウンド) ごとの `observation` に `price` / `quantity` / `profit`，企業ごとの `terminal` — と，企業ごとの解析ベンチマーク (`x.han2023.benchmark`) を持つ．ラウンドと企業の **両方** で決まる行は指標にできない (`metrics.csv` に系列を表す列が無い)．スイープは «親 run (格子) + 条件ごとの `sweep-point` 子» で，子の `events.jsonl` が試行 1 本ごとの `terminal` を持つ．
 
 ## 参考文献
 

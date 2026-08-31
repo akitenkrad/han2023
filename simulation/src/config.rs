@@ -1,11 +1,9 @@
 //! シミュレーション設定．
 //!
 //! Han, Wu & Xiao (2023) SABM のコアモデル (LLM 駆動の差別化財ベルトラン複占
-//! 繰り返し価格ゲーム) と感度分析パラメータを保持する [`Config`] と，その JSON
-//! シリアライズ表現を定義する．企業数・需要パラメータ (a, β, d → α, b 導出)・
+//! 繰り返し価格ゲーム) と感度分析パラメータを保持する [`Config`] を定義する．
+//! 企業数・需要パラメータ (a, β, d → α, b 導出)・
 //! 非対称コスト・ペルソナ・会話の有無・最大ラウンド・LLM 設定をここに集約する．
-
-use serde::Serialize;
 
 use crate::demand::DemandParams;
 use crate::world::Persona;
@@ -59,8 +57,6 @@ pub struct Config {
     pub seed: Option<u64>,
     /// LLM レイヤ設定．
     pub llm: LlmSettings,
-    /// 結果出力ディレクトリ．
-    pub output_dir: String,
 }
 
 impl Default for Config {
@@ -80,7 +76,6 @@ impl Default for Config {
             init_price: None,
             seed: Some(42),
             llm: LlmSettings::default(),
-            output_dir: "results".to_string(),
         }
     }
 }
@@ -104,58 +99,6 @@ impl Config {
 /// `run` の試行シードを派生する (試行 index で独立化する)．
 pub fn derive_run_seed(base: u64, run_idx: usize) -> u64 {
     socsim_core::derive_seed(base, &[run_idx as u64])
-}
-
-/// `config.json` (run 用) のシリアライズ表現．
-#[derive(Serialize)]
-pub struct RunConfigJson {
-    pub command: &'static str,
-    pub n_firms: usize,
-    pub a: f64,
-    pub beta: f64,
-    pub d: f64,
-    pub d_over_beta: f64,
-    pub alpha: f64,
-    pub b: f64,
-    pub c1: f64,
-    pub c2: f64,
-    pub persona: String,
-    pub communication: bool,
-    pub max_rounds: usize,
-    pub reflection_period: usize,
-    pub memory_window: usize,
-    pub seed: Option<u64>,
-    pub llm_temperature: f32,
-    pub llm_seed: u64,
-    pub output_dir: String,
-}
-
-impl Config {
-    /// `config.json` 用の表現を組み立てる．
-    pub fn to_run_config_json(&self) -> RunConfigJson {
-        let dp = self.demand_params();
-        RunConfigJson {
-            command: "run",
-            n_firms: self.n_firms,
-            a: self.a,
-            beta: self.beta,
-            d: self.d,
-            d_over_beta: dp.d_over_beta(),
-            alpha: dp.alpha,
-            b: dp.b,
-            c1: self.c1,
-            c2: self.c2,
-            persona: self.persona.label().to_string(),
-            communication: self.communication,
-            max_rounds: self.max_rounds,
-            reflection_period: self.reflection_period,
-            memory_window: self.memory_window,
-            seed: self.seed,
-            llm_temperature: self.llm.temperature,
-            llm_seed: self.llm.seed,
-            output_dir: self.output_dir.clone(),
-        }
-    }
 }
 
 #[cfg(test)]
