@@ -142,6 +142,24 @@ pub fn run_with_client(
     cfg: &Config,
     client: SabmClient,
 ) -> std::result::Result<SimulationResult, String> {
+    run_with_client_observed(cfg, client, |_| {})
+}
+
+/// The same, calling `on_round` once for every round of the price game.
+///
+/// The callback is where a caller counts its progress. A round is the unit
+/// because it is the unit the cost is in: one round asks every firm for a price
+/// and, when `communication` is on, for a message first — one model call each.
+/// A trial of `max_rounds` rounds would be a single tick, which is the
+/// granularity that leaves a live run silent for the whole of it.
+///
+/// It is given the round number rather than nothing so a caller can report
+/// against the clock rather than against its own tally.
+pub fn run_with_client_observed(
+    cfg: &Config,
+    client: SabmClient,
+    mut on_round: impl FnMut(usize),
+) -> std::result::Result<SimulationResult, String> {
     let root = cfg.seed.unwrap_or_else(rand::random);
 
     let mut init_rng = SimRng::from_seed(derive_seed(root, &[RNG_WORLD_INIT]));
@@ -184,6 +202,7 @@ pub fn run_with_client(
     let mut final_round = 0usize;
     sim.run_observed(|report| {
         final_round = report.t as usize;
+        on_round(final_round);
     })
     .map_err(|e| format!("シミュレーションの実行に失敗: {e}"))?;
 

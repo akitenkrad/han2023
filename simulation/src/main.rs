@@ -28,7 +28,7 @@ use serde::Serialize;
 use sabm_simulation::config::{derive_run_seed, Config, LlmSettings};
 use sabm_simulation::llm::{build_live_client, wrap_client, SabmClient};
 use sabm_simulation::record::{self, RunParameters, DOMAIN, DOMAIN_ANALYSIS, EXPERIMENT, REPO_ID};
-use sabm_simulation::simulation::{compute_benchmarks, run_with_client, SimulationResult};
+use sabm_simulation::simulation::{compute_benchmarks, run_with_client_observed, SimulationResult};
 use sabm_simulation::world::parse_persona;
 use socsim_llm::mock::ScriptedClient;
 use socsim_llm::PromptCache;
@@ -646,6 +646,18 @@ fn cmd_run(args: RunArgs) {
     println!("出力先: {}", rv.dir().display());
     println!("-------------------------------------------------");
 
+    // 進捗の 1 単位は 1 ラウンド．費用がそこにあり，1 ラウンドは全企業に価格を
+    // 尋ね，会話ありならその前にメッセージも尋ねる — どちらも 1 社 1 回の
+    // モデル呼び出しになる．試行を単位にすると，ライブの 1 本は 0/1 と出したきり
+    // 終わりまで黙る．
+    //
+    // 分母は持たない．`ProfitReward` は平均価格系列が定常になった時点で
+    // `request_stop()` するので，max_rounds は «上限» であって仕事の量ではない．
+    // mock の実測では `--max-rounds 300` の 1 本が 40 ラウンドで止まった (13%)．
+    // ライブで何ラウンド目に止まるかは走らせるまで分からないので，上限を分母に
+    // 置けば見積もりは最後まで数倍長いままになり，stage は 13% で «done» と
+    // 閉じることになる．数えた分だけを出す．
+    let mut stage = rv.unbounded_stage("rounds");
     let mut last: Option<(SimulationResult, u64)> = None;
 
     for run_idx in 0..runs {
@@ -655,7 +667,8 @@ fn cmd_run(args: RunArgs) {
             ..base_cfg.clone()
         };
         let (cfg, client, _, _) = build_client(&cfg, args.mock);
-        let result = run_with_client(&cfg, client).unwrap_or_else(|e| panic!("実行に失敗: {}", e));
+        let result = run_with_client_observed(&cfg, client, |_| stage.tick())
+            .unwrap_or_else(|e| panic!("実行に失敗: {}", e));
 
         // 詳細を残すのは最後の試行 (代表 run) だけ．移行前も同じで，先行する試行は
         // キャッシュを温めるだけだった．
@@ -663,6 +676,10 @@ fn cmd_run(args: RunArgs) {
             last = Some((result, seed));
         }
     }
+
+    // manifest.csv は finish() で封をされる．その後に 1 行足せば，manifest が
+    // 食い違うダイジェストを持つことになる．
+    stage.close();
 
     let (result, seed) = last.expect("試行が 1 本もありません");
     for m in &result.metrics {
@@ -804,6 +821,16 @@ fn cmd_sweep(args: SweepArgs) {
     println!("出力先: {}", parent.dir().display());
     println!("-----------------------------------------------------------");
 
+    // 掃引全体で stage を 1 つ．条件ごとに開け直すと小さな tally が並ぶだけで，
+    // 掃引全体のどこにいるかは分からない．
+    //
+    // 企業数で分けることはしない．1 ラウンドのモデル呼び出し数は企業数に比例する
+    // が，既定の `--firms-values 2,3` では 1.5 倍しか違わない．しかも stage は
+    // 分母を持たない (`ProfitReward` が定常判定で早期に止めるので max_rounds は
+    // 上限でしかない) ので，守るべき割合も見積もりも無い — 分けても «いまどこか»
+    // を名前で言う以外の働きがなく，そのぶん全体の進み方が読めなくなる．
+    let mut stage = parent.unbounded_stage("rounds");
+
     let mut done = 0usize;
     // d/β ごとの平均 collusion index (表示のためだけに持つ)．
     let mut per_d_beta: Vec<(f64, Vec<f64>)> =
@@ -878,8 +905,8 @@ fn cmd_sweep(args: SweepArgs) {
                 };
 
                 let (cfg, client, _, _) = build_client(&cfg, args.mock);
-                let result =
-                    run_with_client(&cfg, client).unwrap_or_else(|e| panic!("実行に失敗: {}", e));
+                let result = run_with_client_observed(&cfg, client, |_| stage.tick())
+                    .unwrap_or_else(|e| panic!("実行に失敗: {}", e));
 
                 let outcome = record::log_trial(
                     &mut child,
@@ -907,6 +934,10 @@ fn cmd_sweep(args: SweepArgs) {
             );
         }
     }
+
+    // manifest.csv は finish() で封をされる．その後に 1 行足せば，manifest が
+    // 食い違うダイジェストを持つことになる．
+    stage.close();
 
     let parent_dir = parent
         .finish()
@@ -1043,6 +1074,13 @@ fn cmd_reproduce(args: ReproduceArgs) {
 
     let mut scenarios: Vec<ReproduceScenario> = Vec::new();
 
+    // 2 シナリオを通して stage は 1 つ．シナリオごとに開け直すと小さな tally が
+    // 2 つ並ぶだけで，reproduce 全体の進み方が読めなくなる．`communication = false`
+    // のとき CommunicationPhase は no-op なので 1 ラウンドの呼び出し数は半分に
+    // なるが，2 倍の開きで，しかも stage は分母を持たない — 守るべき見積もりが
+    // 無い以上，分ける理由にはならない．
+    let mut stage = rv.unbounded_stage("rounds");
+
     for (name, communication) in scenarios_spec {
         let seed = socsim_core::derive_seed(args.seed, &[communication as u64]);
         let cfg = Config {
@@ -1051,7 +1089,8 @@ fn cmd_reproduce(args: ReproduceArgs) {
             ..base_cfg.clone()
         };
         let (cfg, client, _, _) = build_client(&cfg, args.mock);
-        let result = run_with_client(&cfg, client).unwrap_or_else(|e| panic!("実行に失敗: {}", e));
+        let result = run_with_client_observed(&cfg, client, |_| stage.tick())
+            .unwrap_or_else(|e| panic!("実行に失敗: {}", e));
 
         // 2 シナリオが 1 本の run に同居するので，(step, scope, name) が衝突しない
         // ようシナリオ名を指標名と unit_id の接頭辞にする．
@@ -1072,6 +1111,10 @@ fn cmd_reproduce(args: ReproduceArgs) {
             p_cartel: mean(&result.benchmarks.p_cartel),
         });
     }
+
+    // manifest.csv は finish() で封をされる．その後に 1 行足せば，manifest が
+    // 食い違うダイジェストを持つことになる．
+    stage.close();
 
     let base = &scenarios[0]; // no_communication = 論文 Fig.1 の基本ケース．
     let p_bertrand = base.p_bertrand;
