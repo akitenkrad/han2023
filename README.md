@@ -93,6 +93,11 @@ cargo run --release -- run --communication --persona active --max-rounds 1000 --
 cargo run --release -- run --persona aggressive --c1 2 --c2 5 --max-rounds 1000 --seed 42
 ```
 
+
+## Scratch runs
+
+Use `--scratch` for development, debugging, and smoke-test runs. Scratch runs are created under `results/_scratch/`, are never synced to the vault, and the latest scratch run can be located with `runvault path --scratch`.
+
 ## Scope
 
 This repository implements the full SABM model: the `MarketWorld` + mechanisms over the six-phase loop, the analytic Bertrand/cartel benchmarks, the LLM pricing-decision layer with Ollama→OpenAI fallback + caching, the tacit-collusion / collusion-index metrics, the `sweep` over product-differentiation `d/β` × firm count, the **communication-enabled** variant (a `CommunicationPhase` cheap-talk message exchange before pricing, toggled by `--communication`), per-firm **personas** and **asymmetric marginal costs** (`c2 ≠ c1`), and the one-shot paper reproduction (`reproduce`, Fig.1/2/4 batch with PASS/off anchors). The Python `sabm-tools` provide `visualize` / `visualize-sweep` / `show-experiment-settings` / `reproduce`. The default path (no communication, symmetric costs, `active` persona) is the paper's basic case and is bit-identical to the pre-variant core given a seed.

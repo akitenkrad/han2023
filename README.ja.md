@@ -93,6 +93,11 @@ cargo run --release -- run --communication --persona active --max-rounds 1000 --
 cargo run --release -- run --persona aggressive --c1 2 --c2 5 --max-rounds 1000 --seed 42
 ```
 
+
+## Scratch run
+
+開発中・デバッグ中・動作確認の実行には `--scratch` を付ける．run は `results/_scratch/` に作られ，同期されない．最新の scratch run は `runvault path --scratch` で取得できる．
+
 ## スコープ
 
 本リポジトリは SABM モデルを全面的に実装している: `MarketWorld` + 6-phase ループ上のメカニズム，解析的なベルトラン/カルテルベンチマーク，Ollama→OpenAI フォールバック + キャッシュの LLM 価格決定レイヤ，暗黙の共謀 / collusion index 指標，製品差別化度 `d/β` × 企業数 の `sweep`，**会話あり**変種 (価格決定前に cheap-talk メッセージを交換する `CommunicationPhase`; `--communication` で切替),企業ごとの**ペルソナ**と**非対称限界費用** (`c2 ≠ c1`),論文 Fig.1/2/4 一括再現 (`reproduce`; PASS/off アンカー付き)．Python `sabm-tools` は `visualize` / `visualize-sweep` / `show-experiment-settings` / `reproduce` を提供する．既定経路 (会話なし・対称コスト・`active` ペルソナ) は論文の基本ケースであり，同一シードでは変種追加前のコアと bit 等価である．

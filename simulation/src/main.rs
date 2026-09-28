@@ -44,6 +44,9 @@ use socsim_llm::PromptCache;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+    /// Development run: write it under results/_scratch/ so it is never synced to the vault.
+    #[arg(long, global = true)]
+    scratch: bool,
 
     /// Ollama 接続先 URL（指定時は環境変数 OLLAMA_HOST を上書きする）．
     #[arg(long, global = true)]
@@ -480,7 +483,7 @@ struct ReproduceParameters {
 // benchmark
 // ---------------------------------------------------------------------------
 
-fn cmd_benchmark(args: BenchmarkArgs) {
+fn cmd_benchmark(args: BenchmarkArgs, scratch: bool) {
     let cfg = Config {
         n_firms: args.market.firms,
         a: args.market.a,
@@ -510,6 +513,7 @@ fn cmd_benchmark(args: BenchmarkArgs) {
     // 書くことになる)．
     let mut rv = Run::start(
         RunOptions::new(EXPERIMENT, "benchmark")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN_ANALYSIS)
             .results_root(&args.output_dir)
@@ -561,7 +565,7 @@ fn cmd_benchmark(args: BenchmarkArgs) {
 // run
 // ---------------------------------------------------------------------------
 
-fn cmd_run(args: RunArgs) {
+fn cmd_run(args: RunArgs, scratch: bool) {
     let persona = parse_persona(&args.persona).unwrap_or_else(|e| panic!("{}", e));
 
     if !args.mock {
@@ -601,6 +605,7 @@ fn cmd_run(args: RunArgs) {
 
     let mut rv = Run::start(
         RunOptions::new(EXPERIMENT, "run")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -723,7 +728,7 @@ fn cmd_run(args: RunArgs) {
 // sweep
 // ---------------------------------------------------------------------------
 
-fn cmd_sweep(args: SweepArgs) {
+fn cmd_sweep(args: SweepArgs, scratch: bool) {
     let persona = parse_persona(&args.persona).unwrap_or_else(|e| panic!("{}", e));
     let d_beta_values: Vec<f64> = split_csv(&args.d_beta_values)
         .iter()
@@ -790,6 +795,7 @@ fn cmd_sweep(args: SweepArgs) {
     // /parameters.seed と seed_pointers 経由で execution_hash に残る．
     let parent = Run::start(
         RunOptions::new(EXPERIMENT, "sweep")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -859,6 +865,7 @@ fn cmd_sweep(args: SweepArgs) {
             // 同じ条件の繰り返しは無いので replicate_index は 0．
             let mut child = Run::start(
                 RunOptions::new(EXPERIMENT, "sweep-point")
+                    .scratch(scratch)
                     .repo_id(REPO_ID)
                     .domain(DOMAIN)
                     .results_root(&args.output_dir)
@@ -995,7 +1002,7 @@ struct ReproduceAnchor {
     pass: bool,
 }
 
-fn cmd_reproduce(args: ReproduceArgs) {
+fn cmd_reproduce(args: ReproduceArgs, scratch: bool) {
     let persona = parse_persona(&args.persona).unwrap_or_else(|e| panic!("{}", e));
     let max_rounds = if args.quick { 80 } else { args.max_rounds };
 
@@ -1049,6 +1056,7 @@ fn cmd_reproduce(args: ReproduceArgs) {
 
     let mut rv = Run::start(
         RunOptions::new(EXPERIMENT, "reproduce")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -1232,13 +1240,14 @@ fn cmd_reproduce(args: ReproduceArgs) {
 
 fn main() {
     let cli = Cli::parse();
+    let scratch = cli.scratch;
     if let Some(host) = cli.ollama_host.as_deref() {
         std::env::set_var("OLLAMA_HOST", host);
     }
     match cli.command {
-        Commands::Benchmark(args) => cmd_benchmark(args),
-        Commands::Run(args) => cmd_run(args),
-        Commands::Sweep(args) => cmd_sweep(args),
-        Commands::Reproduce(args) => cmd_reproduce(args),
+        Commands::Benchmark(args) => cmd_benchmark(args, scratch),
+        Commands::Run(args) => cmd_run(args, scratch),
+        Commands::Sweep(args) => cmd_sweep(args, scratch),
+        Commands::Reproduce(args) => cmd_reproduce(args, scratch),
     }
 }
