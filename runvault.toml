@@ -1,3 +1,259 @@
-# Metric descriptions are not written yet (MYTASK-3382). Until they are,
-# runvault records undeclared metrics instead of refusing them.
-require_docs = false
+# 指標が何を測っているか (runvault の宣言．rs-runvault docs/metrics.ja.md)．
+#
+# 名前は `simulation/src/record.rs` と `simulation/src/main.rs` が書いているものと
+# 一致していなければならない．`reproduce` が名前へ畳み込むシナリオは
+# `no_communication` / `communication` の 2 値であり，全名を展開している．
+#
+# 価格・共謀指数・利益は市場過程の記述量なので `direction = "none"` とする．
+
+# --- 単一 run のラウンド指標 ---------------------------------------------
+
+[metrics."avg_price"]
+meaning   = "そのラウンドに全企業が設定した価格の平均"
+unit      = "price"
+direction = "none"
+scope     = ["run"]
+
+[metrics."collusion_index"]
+meaning   = "平均価格を Bertrand 均衡 0，cartel 価格 1 として正規化した共謀指数"
+unit      = "ratio"
+direction = "none"
+scope     = ["run"]
+
+[metrics."total_profit"]
+meaning   = "そのラウンドに全企業が得た利益の合計"
+unit      = "profit"
+direction = "none"
+scope     = ["run"]
+
+# --- 単一 run 全体 ---------------------------------------------------------
+
+[metrics."p_bertrand_mean"]
+meaning   = "解析的に求めた企業別 Bertrand 均衡価格の平均"
+unit      = "price"
+direction = "none"
+scope     = ["run"]
+
+[metrics."p_cartel_mean"]
+meaning   = "解析的に求めた企業別 cartel 価格の平均"
+unit      = "price"
+direction = "none"
+scope     = ["run"]
+
+[metrics."rounds_to_stable"]
+meaning   = "価格が安定または有界振動へ達するまでのラウンド数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."llm_calls"]
+meaning   = "この run が行った LLM の呼び出し回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."llm_cache_hits"]
+meaning   = "LLM 呼び出しのうちキャッシュで応答した回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."llm_cache_hit_rate"]
+meaning   = "LLM 呼び出しのうちキャッシュで応答した割合"
+unit      = "ratio"
+direction = "up"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+# --- sweep セルの試行平均 -------------------------------------------------
+
+[metrics."n_stationary"]
+meaning   = "セル内で価格が定常状態に達した試行の本数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."stationary_rate"]
+meaning   = "セル内の試行群のうち価格が定常状態に達したものの割合"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."mean_final_avg_price"]
+meaning   = "セル内の試行群にわたる最終平均価格の平均"
+unit      = "price"
+direction = "none"
+scope     = ["run"]
+
+[metrics."mean_final_collusion_index"]
+meaning   = "セル内の試行群にわたる最終共謀指数の平均"
+unit      = "ratio"
+direction = "none"
+scope     = ["run"]
+
+[metrics."mean_last_round"]
+meaning   = "セル内の試行群にわたる最終ラウンド番号の平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."mean_rounds_to_stable"]
+meaning   = "定常状態に達した試行に限った到達ラウンド数の平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."n_stable"]
+meaning   = "到達ラウンド数を持つ試行の本数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+# --- reproduce のシナリオ別指標 ------------------------------------------
+
+# 会話なしシナリオ
+
+[metrics."no_communication_avg_price"]
+meaning   = "会話なしシナリオでそのラウンドに全企業が設定した価格の平均"
+unit      = "price"
+direction = "none"
+scope     = ["run"]
+
+[metrics."no_communication_collusion_index"]
+meaning   = "会話なしシナリオの平均価格を Bertrand 均衡 0，cartel 価格 1 として正規化した共謀指数"
+unit      = "ratio"
+direction = "none"
+scope     = ["run"]
+
+[metrics."no_communication_total_profit"]
+meaning   = "会話なしシナリオでそのラウンドに全企業が得た利益の合計"
+unit      = "profit"
+direction = "none"
+scope     = ["run"]
+
+[metrics."no_communication_p_bertrand_mean"]
+meaning   = "会話なしシナリオの解析的な企業別 Bertrand 均衡価格の平均"
+unit      = "price"
+direction = "none"
+scope     = ["run"]
+
+[metrics."no_communication_p_cartel_mean"]
+meaning   = "会話なしシナリオの解析的な企業別 cartel 価格の平均"
+unit      = "price"
+direction = "none"
+scope     = ["run"]
+
+[metrics."no_communication_rounds_to_stable"]
+meaning   = "会話なしシナリオで価格が安定または有界振動へ達するまでのラウンド数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."no_communication_llm_calls"]
+meaning   = "会話なしシナリオが行った LLM の呼び出し回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."no_communication_llm_cache_hits"]
+meaning   = "会話なしシナリオの LLM 呼び出しのうちキャッシュで応答した回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."no_communication_llm_cache_hit_rate"]
+meaning   = "会話なしシナリオの LLM 呼び出しのうちキャッシュで応答した割合"
+unit      = "ratio"
+direction = "up"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+# 会話ありシナリオ
+
+[metrics."communication_avg_price"]
+meaning   = "会話ありシナリオでそのラウンドに全企業が設定した価格の平均"
+unit      = "price"
+direction = "none"
+scope     = ["run"]
+
+[metrics."communication_collusion_index"]
+meaning   = "会話ありシナリオの平均価格を Bertrand 均衡 0，cartel 価格 1 として正規化した共謀指数"
+unit      = "ratio"
+direction = "none"
+scope     = ["run"]
+
+[metrics."communication_total_profit"]
+meaning   = "会話ありシナリオでそのラウンドに全企業が得た利益の合計"
+unit      = "profit"
+direction = "none"
+scope     = ["run"]
+
+[metrics."communication_p_bertrand_mean"]
+meaning   = "会話ありシナリオの解析的な企業別 Bertrand 均衡価格の平均"
+unit      = "price"
+direction = "none"
+scope     = ["run"]
+
+[metrics."communication_p_cartel_mean"]
+meaning   = "会話ありシナリオの解析的な企業別 cartel 価格の平均"
+unit      = "price"
+direction = "none"
+scope     = ["run"]
+
+[metrics."communication_rounds_to_stable"]
+meaning   = "会話ありシナリオで価格が安定または有界振動へ達するまでのラウンド数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."communication_llm_calls"]
+meaning   = "会話ありシナリオが行った LLM の呼び出し回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."communication_llm_cache_hits"]
+meaning   = "会話ありシナリオの LLM 呼び出しのうちキャッシュで応答した回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."communication_llm_cache_hit_rate"]
+meaning   = "会話ありシナリオの LLM 呼び出しのうちキャッシュで応答した割合"
+unit      = "ratio"
+direction = "up"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+# --- reproduce の帯照合 ---------------------------------------------------
+
+[metrics."anchor_no_comm_avg_price_in_band"]
+meaning   = "会話なしシナリオの最終平均価格．Bertrand 均衡と cartel 価格の間にあるかを照合する"
+unit      = "price"
+direction = "none"
+scope     = ["run"]
+
+[metrics."anchor_no_comm_collusion_index"]
+meaning   = "会話なしシナリオの最終共謀指数"
+unit      = "ratio"
+direction = "none"
+scope     = ["run"]
+
+[metrics."anchor_communication_strengthens_collusion"]
+meaning   = "会話ありシナリオの最終共謀指数から会話なしシナリオの値を引いた差"
+unit      = "ratio"
+direction = "up"
+scope     = ["run"]
+
+[metrics."checks_passed"]
+meaning   = "設計アンカーの許容帯に収まった観測量の数"
+unit      = "count"
+direction = "up"
+scope     = ["run"]
+
+[metrics."checks_total"]
+meaning   = "照合した設計アンカーの総数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
