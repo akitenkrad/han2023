@@ -590,6 +590,7 @@ fn cmd_run(args: RunArgs, scratch: bool) {
         memory_window: args.memory_window,
         seed: Some(base_seed),
         llm: LlmSettings {
+            think: None,
             temperature: args.temperature,
             seed: args.llm_seed,
             cache_path: Some(args.cache_path.clone()),
@@ -764,6 +765,7 @@ fn cmd_sweep(args: SweepArgs, scratch: bool) {
         max_rounds: args.max_rounds,
         seed: Some(args.seed),
         llm: LlmSettings {
+            think: None,
             temperature: args.temperature,
             seed: args.llm_seed,
             cache_path: Some(args.cache_path.clone()),
@@ -904,6 +906,7 @@ fn cmd_sweep(args: SweepArgs, scratch: bool) {
                     max_rounds: args.max_rounds,
                     seed: Some(seed),
                     llm: LlmSettings {
+                        think: None,
                         temperature: args.temperature,
                         seed: args.llm_seed,
                         cache_path: Some(args.cache_path.clone()),
@@ -1026,6 +1029,7 @@ fn cmd_reproduce(args: ReproduceArgs, scratch: bool) {
         max_rounds,
         seed: Some(args.seed),
         llm: LlmSettings {
+            think: None,
             temperature: args.temperature,
             seed: args.llm_seed,
             cache_path: Some(args.cache_path.clone()),
